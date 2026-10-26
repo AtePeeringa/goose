@@ -63,8 +63,8 @@ not asked. What happens next depends on the kind of hook:
 
 | Hook | Runs | On `Deny` | On error |
 | --- | --- | --- | --- |
-| Before-call, added with `ToolOperation::with_before_call_hooks` | before each tool call | The tool doesn't run. The model gets `reason` as the tool's error. | The tool doesn't run. The model gets `hook failed: <error>` as the tool's error. |
-| After-call, added with `ToolOperation::with_after_call_hooks` | after each tool call, with its result | The result is thrown away. The model gets `reason` as the tool's error. | The result is thrown away. The model gets `hook failed: <error>` as the tool's error. |
+| Before-call, added with `ToolOperation::with_before_call_hooks` | before each tool call | The tool doesn't run. The model gets `reason` as the tool's error. | The tool doesn't run. The model gets `The tool did not run because a hook failed: <error>` as the tool's error. |
+| After-call, added with `ToolOperation::with_after_call_hooks` | after each tool call, with its result | The result is thrown away. The model gets `reason` as the tool's error. | The result is thrown away. The model gets `The tool completed, but a hook failed while checking its result: <error>` as the tool's error. |
 | Stop, added with `StopHookOperation::new` | when the model ends its turn | The turn keeps going. `reason` is sent to the model as a hidden user message. | The turn ends with the error. |
 
 Things to know:
@@ -76,7 +76,9 @@ Things to know:
 - Calls with unparseable arguments get no hooks. Calls blocked by a before-call
   hook get no after-call hooks.
 - A tool result is saved only after its after-call hooks finish. If the run is
-  stopped while they are running, nothing is saved for that call.
+  stopped while they are running, the result is not saved; the model gets
+  `The tool completed, but the run was stopped before a hook checked its result`
+  as the tool's error instead.
 - Stop hook denials are capped per turn (`with_deny_limit_per_turn`, default 8).
   Past the cap, the turn ends, and the message from `with_deny_limit_message`,
   if set, is built, shown, and saved.

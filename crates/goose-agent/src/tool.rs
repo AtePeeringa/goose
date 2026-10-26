@@ -68,11 +68,14 @@ fn denied(
     Err(ErrorData::internal_error(reason, None))
 }
 
-fn hook_failed(error: anyhow::Error) -> Result<CallToolResult, ErrorData> {
-    Err(ErrorData::internal_error(
-        format!("hook failed: {error:#}"),
-        None,
-    ))
+fn add_tool_response(
+    response: &mut Option<Message>,
+    request: &ToolRequest,
+    result: Result<CallToolResult, ErrorData>,
+) {
+    response
+        .get_or_insert_with(|| Message::user().with_generated_id_if_missing())
+        .add_tool_response_with_metadata(request.id.clone(), result, request.metadata.as_ref());
 }
 
 fn pending_requests(requests: Vec<ToolRequest>, tool_names: &HashSet<&str>) -> Vec<ToolRequest> {
@@ -231,6 +234,7 @@ pub struct ToolOperation<S> {
     before_call_hooks: Vec<Arc<BeforeToolCallHook<S>>>,
     after_call_hooks: Vec<Arc<AfterToolCallHook<S>>>,
     response: Mutex<Option<Message>>,
+    call_in_after_call_hooks: Mutex<Option<ToolRequest>>,
 }
 
 impl<S> ToolOperation<S>
@@ -244,6 +248,7 @@ where
             before_call_hooks: Vec::new(),
             after_call_hooks: Vec::new(),
             response: Mutex::new(None),
+            call_in_after_call_hooks: Mutex::new(None),
         }
     }
 
@@ -335,11 +340,12 @@ where
         &self,
         session: &S,
         conversation: &Conversation,
-        request_id: &str,
+        request: &ToolRequest,
         call: &CallToolRequestParams,
         available: &[(Tool, &dyn ToolProvider<S>)],
         emit: &Emitter,
     ) -> Result<CallToolResult, ErrorData> {
+        let request_id = request.id.as_str();
         let before_call = BeforeToolCall {
             conversation,
             request_id,
@@ -351,7 +357,12 @@ where
                 reason,
                 user_message,
             }) => return denied(emit, reason, user_message),
-            Err(error) => return hook_failed(error),
+            Err(error) => {
+                return Err(ErrorData::internal_error(
+                    format!("The tool did not run because a hook failed: {error:#}"),
+                    None,
+                ))
+            }
         }
         let provider = available
             .iter()
@@ -365,13 +376,21 @@ where
             call,
             result: &result,
         };
-        match run_hooks(&self.after_call_hooks, session, &after_call).await {
+        *self.call_in_after_call_hooks.lock().unwrap() = Some(request.clone());
+        let decision = run_hooks(&self.after_call_hooks, session, &after_call).await;
+        *self.call_in_after_call_hooks.lock().unwrap() = None;
+        match decision {
             Ok(HookDecision::Allow) => result,
             Ok(HookDecision::Deny {
                 reason,
                 user_message,
             }) => denied(emit, reason, user_message),
-            Err(error) => hook_failed(error),
+            Err(error) => Err(ErrorData::internal_error(
+                format!(
+                    "The tool completed, but a hook failed while checking its result: {error:#}"
+                ),
+                None,
+            )),
         }
     }
 }
@@ -402,7 +421,17 @@ where
         _conversation: &Conversation,
         emit: &Emitter,
     ) -> Vec<E> {
-        let response = self.response.lock().unwrap().take();
+        let mut response = self.response.lock().unwrap().take();
+        if let Some(request) = self.call_in_after_call_hooks.lock().unwrap().take() {
+            add_tool_response(
+                &mut response,
+                &request,
+                Err(ErrorData::internal_error(
+                    "The tool completed, but the run was stopped before a hook checked its result",
+                    None,
+                )),
+            );
+        }
         match response {
             Some(response) => vec![E::from(emit.message(response))],
             None => Vec::new(),
@@ -456,18 +485,11 @@ where
             let tool_result = match request.tool_call.as_ref() {
                 Err(error) => Err(error.clone()),
                 Ok(call) => {
-                    self.call_with_hooks(session, conversation, &request.id, call, &available, emit)
+                    self.call_with_hooks(session, conversation, &request, call, &available, emit)
                         .await
                 }
             };
-            let mut output = self.response.lock().unwrap();
-            let message =
-                output.get_or_insert_with(|| Message::user().with_generated_id_if_missing());
-            message.add_tool_response_with_metadata(
-                request.id,
-                tool_result,
-                request.metadata.as_ref(),
-            );
+            add_tool_response(&mut self.response.lock().unwrap(), &request, tool_result);
         }
         let message = self
             .response

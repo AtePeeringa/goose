@@ -802,7 +802,7 @@ async fn a_failing_before_call_hook_skips_the_call_and_returns_the_error() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         results[0].as_ref().unwrap_err().message,
-        "hook failed: before-call hook crashed"
+        "The tool did not run because a hook failed: before-call hook crashed"
     );
 }
 
@@ -816,7 +816,7 @@ async fn a_failing_after_call_hook_replaces_the_result_with_the_error() {
 
     assert_eq!(
         results[0].as_ref().unwrap_err().message,
-        "hook failed: after-call hook crashed"
+        "The tool completed, but a hook failed while checking its result: after-call hook crashed"
     );
     assert_eq!(
         results[1].as_ref().unwrap().structured_content,
@@ -859,7 +859,7 @@ impl<'a> Hook<(), AfterToolCall<'a>> for StuckAfterCall {
 }
 
 #[tokio::test]
-async fn stopping_during_after_call_hooks_saves_nothing_for_that_call() {
+async fn stopping_during_after_call_hooks_records_that_the_tool_ran() {
     let hook = Arc::new(StuckAfterCall::default());
     let operation = operation().with_after_call_hooks(vec![hook.clone()]);
     let conversation = Conversation::new_unvalidated([
@@ -890,5 +890,13 @@ async fn stopping_during_after_call_hooks_saves_nothing_for_that_call() {
         &emit,
     )
     .await;
-    assert!(saved.is_empty());
+    let [ConversationEffect::AppendMessage(message)] = saved.as_slice() else {
+        panic!("expected one appended message");
+    };
+    let response = message.content[0].as_tool_response().unwrap();
+    assert_eq!(response.id, "call-1");
+    assert_eq!(
+        response.tool_result.as_ref().unwrap_err().message,
+        "The tool completed, but the run was stopped before a hook checked its result"
+    );
 }
