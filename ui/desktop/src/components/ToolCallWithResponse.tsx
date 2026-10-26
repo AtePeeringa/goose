@@ -601,23 +601,19 @@ function ToolCallView({
   const getToolLabelContent = (): string => {
     const args = (toolCall.arguments ?? {}) as Record<string, ToolCallArgumentValue>;
     const toolDisplayName = snakeToTitleCase(getToolName(toolCall.name));
-    const entries = Object.entries(args);
+    const firstEntry = Object.entries(args)[0];
 
-    if (entries.length === 0) {
+    if (!firstEntry) {
       return toolDisplayName;
     }
 
-    if (entries.length === 1) {
-      const [key, value] = entries[0];
-      const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
-      const shortValue =
-        stringValue.length > MAX_TITLE_VALUE_LENGTH
-          ? `${stringValue.substring(0, MAX_TITLE_VALUE_LENGTH)}…`
-          : stringValue;
-      return `${toolDisplayName} ${key}: ${shortValue}`;
-    }
-
-    return `${toolDisplayName} ${entries.map(([key]) => key).join(', ')}`;
+    const [key, value] = firstEntry;
+    const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
+    const shortValue =
+      stringValue.length > MAX_TITLE_VALUE_LENGTH
+        ? `${stringValue.substring(0, MAX_TITLE_VALUE_LENGTH)}…`
+        : stringValue;
+    return `${toolDisplayName} ${key}: ${shortValue}`;
   };
   // Map LoadingStatus to ToolCallStatus
   const getToolCallStatus = (loadingStatus: LoadingStatus): ToolCallStatus => {

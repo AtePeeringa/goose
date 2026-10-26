@@ -209,7 +209,7 @@ describe('Code Mode execution history', () => {
       />,
       { wrapper: IntlTestWrapper }
     );
-    await user.click(screen.getByText(/code, tool_graph$/));
+    await user.click(screen.getByText(/ code: async function run/));
     expect(screen.getByText('1. example__inspect: Inspect example')).toBeInTheDocument();
     await user.click(screen.getByText('Code'));
     expect(
