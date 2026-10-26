@@ -96,8 +96,7 @@ use self::tool_calls::enrichment::{spawn_chain_summary_enrichment, spawn_tool_ti
 mod agent_requests;
 pub use agent_requests::agent_request_schemas;
 mod agent_mentions;
-pub use crate::agents::ActiveRunRegistry;
-use crate::agents::StartRunError;
+use crate::agents::{ActiveRunRegistry, StartRunError};
 mod apps;
 mod config;
 mod custom_dispatch;
@@ -233,7 +232,6 @@ struct AgentStreamOutcome {
 /// The explicit clear still runs on normal paths; this drop is then a no-op
 /// because the entry (matched by run id) is already gone.
 struct ActiveRunDropGuard {
-    registry: Arc<ActiveRunRegistry>,
     services: Arc<StateMachineServices>,
     session_id: String,
     run_id: String,
@@ -243,10 +241,9 @@ struct ActiveRunDropGuard {
 impl Drop for ActiveRunDropGuard {
     fn drop(&mut self) {
         self.cancel_token.cancel();
-        let session_id = std::mem::take(&mut self.session_id);
-        let run_id = std::mem::take(&mut self.run_id);
-        if self.registry.remove_agent_run(&session_id, &run_id) {
-            self.services.discard_pending_steers(&session_id);
+        let runs = &self.services.runtime.runs;
+        if runs.remove_agent_run(&self.session_id, &self.run_id) {
+            self.services.discard_pending_steers(&self.session_id);
         }
     }
 }
@@ -310,7 +307,6 @@ pub fn acp_services_config(
 static NEXT_CONNECTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub struct AcpConnection {
-    active_runs: Arc<ActiveRunRegistry>,
     live_voice: Arc<LiveVoiceService>,
     closed_session_ids: Arc<Mutex<HashSet<String>>>,
     services: Arc<StateMachineServices>,
@@ -813,9 +809,8 @@ pub(super) fn validate_absolute_cwd(cwd: &Path) -> Result<(), agent_client_proto
 }
 
 impl AcpConnection {
-    #[cfg(all(test, feature = "scheduler"))]
-    pub(crate) fn active_run_registry(&self) -> &Arc<ActiveRunRegistry> {
-        &self.active_runs
+    fn runs(&self) -> &ActiveRunRegistry {
+        &self.services.runtime.runs
     }
 
     #[cfg(all(test, feature = "scheduler"))]
@@ -836,7 +831,6 @@ impl AcpConnection {
     #[cfg(all(test, feature = "scheduler"))]
     pub(crate) fn test_drop_active_run_guard(&self, session_id: &str, run_id: &str) {
         drop(ActiveRunDropGuard {
-            registry: self.active_runs.clone(),
             services: Arc::clone(&self.services),
             session_id: session_id.to_string(),
             run_id: run_id.to_string(),
@@ -953,7 +947,6 @@ impl AcpConnection {
         let (thinking_effort_update_tx, thinking_effort_update_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
-            active_runs: Arc::clone(&services.runtime.runs),
             live_voice: options.live_voice,
             closed_session_ids: Arc::new(Mutex::new(HashSet::new())),
             services,
@@ -1817,7 +1810,7 @@ impl AcpConnection {
             .data(format!("Session not found: {}", session_id)));
         }
 
-        self.active_runs
+        self.runs()
             .start_prompt_run(session_id, run_id, cancel_token)
             .map_err(|error| match error {
                 StartRunError::AgentRunExists { run_id } => {
@@ -1834,7 +1827,7 @@ impl AcpConnection {
     }
 
     async fn clear_active_run(&self, session_id: &str, run_id: &str) {
-        if self.active_runs.remove_agent_run(session_id, run_id) {
+        if self.runs().remove_agent_run(session_id, run_id) {
             self.services.discard_pending_steers(session_id);
         }
 
@@ -1853,7 +1846,7 @@ impl AcpConnection {
                 .data("expectedRunId must not be empty"));
         }
 
-        let active_run_id = self.active_runs.agent_run_id(session_id).ok_or_else(|| {
+        let active_run_id = self.runs().agent_run_id(session_id).ok_or_else(|| {
             agent_client_protocol::Error::invalid_params().data("no active run to steer")
         })?;
         if active_run_id != expected_run_id {
@@ -2202,7 +2195,6 @@ impl AcpConnection {
         // connection carrying it is revoked or lost); a normal completion's
         // explicit clear wins and makes the guard's cleanup a no-op.
         let _run_guard = ActiveRunDropGuard {
-            registry: self.active_runs.clone(),
             services: Arc::clone(&self.services),
             session_id: session_id.clone(),
             run_id: run_id.clone(),
@@ -2323,7 +2315,7 @@ impl AcpConnection {
         debug!(?args, "cancel request");
 
         let session_id = args.session_id.0.to_string();
-        let token = self.active_runs.agent_cancel_token(&session_id);
+        let token = self.runs().agent_cancel_token(&session_id);
 
         if let Some(token) = token {
             info!(session_id = %session_id, "prompt cancelled");

@@ -201,14 +201,13 @@ impl AcpConnection {
         let cancel_token = CancellationToken::new();
         let run_id = format!("run_{}", Uuid::new_v4());
         if self
-            .active_runs
+            .runs()
             .start_live_delegation(&session_id, run_id.clone(), cancel_token.clone())
             .is_err()
         {
             return Err("Goose is already working on a task.".into());
         }
         let run_guard = ActiveRunDropGuard {
-            registry: self.active_runs.clone(),
             services: Arc::clone(&self.services),
             session_id: session_id.clone(),
             run_id: run_id.clone(),
@@ -359,7 +358,7 @@ impl AcpConnection {
         session_id: &str,
         input: String,
     ) -> Result<String, String> {
-        if self.active_runs.agent_run_id(session_id).is_none() {
+        if self.runs().agent_run_id(session_id).is_none() {
             return Err("The task could not receive the latest instruction.".into());
         }
         self.services

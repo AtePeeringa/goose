@@ -295,7 +295,6 @@ impl AcpConnection {
         let task_acp_session_id = acp_session_id.clone();
         if let Err(error) = cx.spawn(async move {
             let _run_guard = ActiveRunDropGuard {
-                registry: server.active_runs.clone(),
                 services: Arc::clone(&server.services),
                 session_id: task_session_id.clone(),
                 run_id: task_run_id.clone(),
@@ -446,7 +445,7 @@ impl AcpConnection {
         response = response.meta(meta);
 
         let is_subagent = session.session_type == SessionType::SubAgent;
-        let already_running = self.active_runs.agent_run_id(&session_id_str).is_some();
+        let already_running = self.runs().agent_run_id(&session_id_str).is_some();
         if awaiting_confirmation && !is_subagent && !already_running {
             self.start_resumed_state_machine_turn(cx, &session_id_str, &pending_confirmations)
                 .await?;

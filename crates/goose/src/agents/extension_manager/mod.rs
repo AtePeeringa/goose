@@ -731,13 +731,14 @@ impl ExtensionManager {
         scope_id: &str,
         working_dir: Option<PathBuf>,
         slots: Vec<Arc<ExtensionSlot>>,
+        client: &ClientContext,
     ) -> ExtensionLease {
         ExtensionLease::new(
             scope_id,
             working_dir,
             slots,
             self.context.session_manager.action_required(),
-            self.client(scope_id).hydrates_mcp_apps(),
+            client.hydrates_mcp_apps(),
         )
     }
 
@@ -801,7 +802,7 @@ impl ExtensionManager {
             scopes.insert(set.scope_id().to_string(), selected);
             slots
         };
-        self.lease(set.scope_id(), set.working_dir.clone(), slots)
+        self.lease(set.scope_id(), set.working_dir.clone(), slots, &client)
     }
 
     pub async fn current_lease(self: &Arc<Self>, session_id: &str) -> Result<ExtensionLease> {
@@ -828,6 +829,7 @@ impl ExtensionManager {
 
     #[cfg(test)]
     pub(crate) async fn scope_lease(&self, scope_id: &str) -> ExtensionLease {
+        let client = self.client(scope_id);
         let slots = self
             .scopes
             .lock()
@@ -837,7 +839,7 @@ impl ExtensionManager {
             .flat_map(IndexMap::values)
             .cloned()
             .collect();
-        self.lease(scope_id, None, slots)
+        self.lease(scope_id, None, slots, &client)
     }
 
     async fn session_lease(self: &Arc<Self>, session: &Session) -> Result<ExtensionLease> {
@@ -2265,30 +2267,31 @@ mod tests {
         let manager = Arc::new(ExtensionManager::with_data_dir(
             temp_dir.path().to_path_buf(),
         ));
-        let session = session_selecting(
-            &manager,
-            temp_dir.path(),
+        let set = ExtensionSet::new(
+            "client-snapshot",
+            Some(temp_dir.path().to_path_buf()),
             vec![
                 builtin_config("developer", vec![]),
                 fixture_config("client_fixture", serve_fixture),
             ],
         )
-        .await;
-        let slots = || async { manager.scopes.lock().await[&session.id].clone() };
-
-        manager.attach_client(
-            &session.id,
-            ClientContext::new(&GoosePlatform::GooseDesktop, None),
-        );
-        let held = manager.current_lease(&session.id).await.unwrap();
+        .unwrap();
+        let slots = || async { manager.scopes.lock().await[set.scope_id()].clone() };
+        let mut client = ClientContext::new(&GoosePlatform::GooseDesktop, None);
+        manager.attach_client(set.scope_id(), client.clone());
+        let held = manager.resolve(&set).await;
         assert!(held.start().await.iter().all(|result| result.success));
         let first = slots().await;
 
-        manager.attach_client(
-            &session.id,
-            ClientContext::new(&GoosePlatform::GooseDesktop, None),
-        );
-        manager.current_lease(&session.id).await.unwrap();
+        manager.attach_client(set.scope_id(), client.clone());
+        // Change capabilities after resolve captures the client, while it waits for slots.
+        let scopes = manager.scopes.lock().await;
+        let mut resolving = std::pin::pin!(manager.resolve(&set));
+        assert!(futures::poll!(resolving.as_mut()).is_pending());
+        client.capabilities.mcpui = false;
+        manager.attach_client(set.scope_id(), client);
+        drop(scopes);
+        let reattached_lease = resolving.await;
         let reattached = slots().await;
         for key in ["developer", "client_fixture"] {
             assert!(
@@ -2297,10 +2300,7 @@ mod tests {
             );
         }
 
-        let mut client = ClientContext::new(&GoosePlatform::GooseDesktop, None);
-        client.capabilities.mcpui = false;
-        manager.attach_client(&session.id, client);
-        let current = manager.current_lease(&session.id).await.unwrap();
+        let current = manager.resolve(&set).await;
         let changed = slots().await;
         assert!(Arc::ptr_eq(&reattached["developer"], &changed["developer"]));
         assert!(!Arc::ptr_eq(
@@ -2309,22 +2309,26 @@ mod tests {
         ));
         assert!(current.start().await.iter().all(|result| result.success));
 
-        let result = held
-            .call(
-                CallToolRequestParams::new("client_fixture__get_code"),
-                CallRequest::default(),
-                CancellationToken::default(),
-            )
-            .await
-            .unwrap()
-            .result
-            .await
-            .unwrap();
-        assert!(!result.is_error.unwrap_or(false));
-        assert!(result
-            .content
-            .iter()
-            .any(|content| content.as_text().is_some_and(|text| text.text == FAKE_CODE)));
+        for (lease, supports_apps) in [(&held, true), (&reattached_lease, true), (&current, false)]
+        {
+            let result = lease
+                .call(
+                    CallToolRequestParams::new("client_fixture__app_card"),
+                    CallRequest::default(),
+                    CancellationToken::default(),
+                )
+                .await
+                .unwrap()
+                .result
+                .await
+                .unwrap();
+            assert!(!result.is_error.unwrap_or(false));
+            let hydrated = result
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.0.contains_key(TRUSTED_TOOL_UPDATE_META_KEY));
+            assert_eq!(hydrated, supports_apps);
+        }
     }
 
     #[tokio::test]

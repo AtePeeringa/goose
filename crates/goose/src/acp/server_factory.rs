@@ -179,17 +179,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connections_to_one_server_share_its_agent_and_run_registry() {
+    async fn connections_to_one_server_share_its_services() {
         let root = tempfile::tempdir().unwrap();
         let server = server(root.path().to_path_buf(), false);
 
         let a = server.create_connection().await.unwrap();
         let b = server.create_connection().await.unwrap();
 
-        assert!(Arc::ptr_eq(
-            a.active_run_registry(),
-            b.active_run_registry()
-        ));
         assert!(Arc::ptr_eq(a.services(), b.services()));
     }
 
