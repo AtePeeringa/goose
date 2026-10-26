@@ -68,6 +68,13 @@ fn denied(
     Err(ErrorData::internal_error(reason, None))
 }
 
+fn hook_failed(error: anyhow::Error) -> Result<CallToolResult, ErrorData> {
+    Err(ErrorData::internal_error(
+        format!("hook failed: {error:#}"),
+        None,
+    ))
+}
+
 fn pending_requests(requests: Vec<ToolRequest>, tool_names: &HashSet<&str>) -> Vec<ToolRequest> {
     requests
         .into_iter()
@@ -338,12 +345,13 @@ where
             request_id,
             call,
         };
-        if let HookDecision::Deny {
-            reason,
-            user_message,
-        } = run_hooks(&self.before_call_hooks, session, &before_call).await
-        {
-            return denied(emit, reason, user_message);
+        match run_hooks(&self.before_call_hooks, session, &before_call).await {
+            Ok(HookDecision::Allow) => {}
+            Ok(HookDecision::Deny {
+                reason,
+                user_message,
+            }) => return denied(emit, reason, user_message),
+            Err(error) => return hook_failed(error),
         }
         let provider = available
             .iter()
@@ -358,11 +366,12 @@ where
             result: &result,
         };
         match run_hooks(&self.after_call_hooks, session, &after_call).await {
-            HookDecision::Allow => result,
-            HookDecision::Deny {
+            Ok(HookDecision::Allow) => result,
+            Ok(HookDecision::Deny {
                 reason,
                 user_message,
-            } => denied(emit, reason, user_message),
+            }) => denied(emit, reason, user_message),
+            Err(error) => hook_failed(error),
         }
     }
 }

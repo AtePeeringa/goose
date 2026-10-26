@@ -78,7 +78,7 @@ where
             return not_applicable();
         }
         let (reason, user_message) =
-            match run_hooks(&self.hooks, session, &Stop { conversation }).await {
+            match run_hooks(&self.hooks, session, &Stop { conversation }).await? {
                 HookDecision::Allow => return yielded(),
                 HookDecision::Deny {
                     reason,

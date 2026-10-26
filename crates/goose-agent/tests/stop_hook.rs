@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
 };
 
+use anyhow::Result;
 use async_trait::async_trait;
 use goose_agent::{
     events::AgentEvent,
@@ -41,15 +42,24 @@ impl FakeHook {
 
 #[async_trait]
 impl<'a> Hook<(), Stop<'a>> for FakeHook {
-    async fn decide(&self, _session: &(), _event: &Stop<'a>) -> HookDecision {
+    async fn decide(&self, _session: &(), _event: &Stop<'a>) -> Result<HookDecision> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let Some(reason) = self.deny_with else {
-            return HookDecision::Allow;
+            return Ok(HookDecision::Allow);
         };
-        HookDecision::Deny {
+        Ok(HookDecision::Deny {
             reason: reason.to_string(),
             user_message: Some(notice("hook denied")),
-        }
+        })
+    }
+}
+
+struct FailingHook;
+
+#[async_trait]
+impl<'a> Hook<(), Stop<'a>> for FailingHook {
+    async fn decide(&self, _session: &(), _event: &Stop<'a>) -> Result<HookDecision> {
+        anyhow::bail!("stop hook crashed")
     }
 }
 
@@ -283,4 +293,24 @@ async fn the_deny_limit_counts_only_the_current_turn() {
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
     assert!(is_denied(&outcome.appended[0]));
+}
+
+#[tokio::test]
+async fn a_failing_hook_fails_the_operation_and_later_hooks_are_skipped() {
+    let later = FakeHook::denying("keep going");
+    let operation = StopHookOperation::new(vec![Arc::new(FailingHook), later.clone()]);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let emit = Emitter::new(tx, CancellationToken::new());
+    let conversation = Conversation::new_unvalidated([
+        Message::user().with_text("hi"),
+        Message::assistant().with_text("done"),
+    ]);
+
+    let error = Operation::<(), ConversationEffect>::run(&operation, &(), &conversation, &emit)
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(error.to_string(), "stop hook crashed");
+    assert_eq!(later.calls.load(Ordering::SeqCst), 0);
 }

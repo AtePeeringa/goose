@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Result;
 use async_trait::async_trait;
 use goose_provider_types::conversation::message::Message;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
@@ -17,19 +18,19 @@ pub enum HookDecision {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Hook<S, E>: MaybeSend + MaybeSync {
-    async fn decide(&self, session: &S, event: &E) -> HookDecision;
+    async fn decide(&self, session: &S, event: &E) -> Result<HookDecision>;
 }
 
 pub async fn run_hooks<S, E>(
     hooks: &[Arc<dyn Hook<S, E>>],
     session: &S,
     event: &E,
-) -> HookDecision {
+) -> Result<HookDecision> {
     for hook in hooks {
-        let decision = hook.decide(session, event).await;
+        let decision = hook.decide(session, event).await?;
         if matches!(decision, HookDecision::Deny { .. }) {
-            return decision;
+            return Ok(decision);
         }
     }
-    HookDecision::Allow
+    Ok(HookDecision::Allow)
 }

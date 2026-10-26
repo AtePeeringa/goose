@@ -551,30 +551,30 @@ impl RecordingHook {
 
 #[async_trait]
 impl<'a> Hook<(), BeforeToolCall<'a>> for RecordingHook {
-    async fn decide(&self, _session: &(), event: &BeforeToolCall<'a>) -> HookDecision {
+    async fn decide(&self, _session: &(), event: &BeforeToolCall<'a>) -> Result<HookDecision> {
         let call = event.call;
         self.asked
             .lock()
             .unwrap()
             .push(event.request_id.to_string());
-        match self.deny {
+        Ok(match self.deny {
             Some((tool, reason)) if tool == call.name => HookDecision::Deny {
                 reason: reason.to_string(),
                 user_message: None,
             },
             _ => HookDecision::Allow,
-        }
+        })
     }
 }
 
 #[async_trait]
 impl<'a> Hook<(), AfterToolCall<'a>> for RecordingHook {
-    async fn decide(&self, _session: &(), event: &AfterToolCall<'a>) -> HookDecision {
+    async fn decide(&self, _session: &(), event: &AfterToolCall<'a>) -> Result<HookDecision> {
         self.results
             .lock()
             .unwrap()
             .push((event.request_id.to_string(), event.result.clone()));
-        HookDecision::Allow
+        Ok(HookDecision::Allow)
     }
 }
 
@@ -732,14 +732,14 @@ struct DenyResult;
 
 #[async_trait]
 impl<'a> Hook<(), AfterToolCall<'a>> for DenyResult {
-    async fn decide(&self, _session: &(), event: &AfterToolCall<'a>) -> HookDecision {
+    async fn decide(&self, _session: &(), event: &AfterToolCall<'a>) -> Result<HookDecision> {
         if event.call.name != "add" {
-            return HookDecision::Allow;
+            return Ok(HookDecision::Allow);
         }
-        HookDecision::Deny {
+        Ok(HookDecision::Deny {
             reason: "the sum is secret".to_string(),
             user_message: Some(notice("add result was hidden")),
-        }
+        })
     }
 }
 
@@ -760,6 +760,68 @@ async fn a_denied_result_is_replaced_with_the_reason() {
         Some(json!({"greeting": "Hello, Goose!"}))
     );
     assert_eq!(shown, vec!["add result was hidden"]);
+}
+
+struct FailOn(&'static str);
+
+#[async_trait]
+impl<'a> Hook<(), BeforeToolCall<'a>> for FailOn {
+    async fn decide(&self, _session: &(), event: &BeforeToolCall<'a>) -> Result<HookDecision> {
+        if event.call.name != self.0 {
+            return Ok(HookDecision::Allow);
+        }
+        anyhow::bail!("before-call hook crashed")
+    }
+}
+
+#[async_trait]
+impl<'a> Hook<(), AfterToolCall<'a>> for FailOn {
+    async fn decide(&self, _session: &(), event: &AfterToolCall<'a>) -> Result<HookDecision> {
+        if event.call.name != self.0 {
+            return Ok(HookDecision::Allow);
+        }
+        anyhow::bail!("after-call hook crashed")
+    }
+}
+
+#[tokio::test]
+async fn a_failing_before_call_hook_skips_the_call_and_returns_the_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let operation = operation()
+        .with_provider(Arc::new(CountedTool {
+            calls: calls.clone(),
+        }))
+        .with_before_call_hooks(vec![Arc::new(FailOn("counted"))]);
+    let conversation = Conversation::new_unvalidated([
+        Message::user().with_text("count"),
+        Message::assistant().with_tool_request("call-1", Ok(CallToolRequestParams::new("counted"))),
+    ]);
+
+    let results = run_operation(operation, &conversation).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        results[0].as_ref().unwrap_err().message,
+        "hook failed: before-call hook crashed"
+    );
+}
+
+#[tokio::test]
+async fn a_failing_after_call_hook_replaces_the_result_with_the_error() {
+    let results = run_operation(
+        operation().with_after_call_hooks(vec![Arc::new(FailOn("add"))]),
+        &add_and_greet(),
+    )
+    .await;
+
+    assert_eq!(
+        results[0].as_ref().unwrap_err().message,
+        "hook failed: after-call hook crashed"
+    );
+    assert_eq!(
+        results[1].as_ref().unwrap().structured_content,
+        Some(json!({"greeting": "Hello, Goose!"}))
+    );
 }
 
 #[tokio::test]
@@ -790,7 +852,7 @@ struct StuckAfterCall {
 
 #[async_trait]
 impl<'a> Hook<(), AfterToolCall<'a>> for StuckAfterCall {
-    async fn decide(&self, _session: &(), _event: &AfterToolCall<'a>) -> HookDecision {
+    async fn decide(&self, _session: &(), _event: &AfterToolCall<'a>) -> Result<HookDecision> {
         self.reached.store(true, Ordering::SeqCst);
         std::future::pending().await
     }

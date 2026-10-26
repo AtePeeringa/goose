@@ -1,5 +1,6 @@
 //! Lets stop hooks accept or block a completed assistant turn.
 
+use anyhow::Result;
 use async_trait::async_trait;
 use goose_agent::hook::{Hook, HookDecision};
 use goose_agent::stop_hook::Stop;
@@ -60,7 +61,7 @@ impl GooseStopHook {
 
 #[async_trait]
 impl<'a> Hook<Session, Stop<'a>> for GooseStopHook {
-    async fn decide(&self, session: &Session, event: &Stop<'a>) -> HookDecision {
+    async fn decide(&self, session: &Session, event: &Stop<'a>) -> Result<HookDecision> {
         let context = HookContext::new(HookEvent::Stop, &session.id)
             .with_last_assistant_message(Self::trailing_assistant_text(
                 event.conversation.messages(),
@@ -71,11 +72,11 @@ impl<'a> Hook<Session, Stop<'a>> for GooseStopHook {
             .emit_blocking(HookEvent::Stop, context)
             .await
         {
-            PluginHookDecision::Allow => HookDecision::Allow,
-            PluginHookDecision::Deny { reason, plugin } => HookDecision::Deny {
+            PluginHookDecision::Allow => Ok(HookDecision::Allow),
+            PluginHookDecision::Deny { reason, plugin } => Ok(HookDecision::Deny {
                 reason: denial_reason(&plugin, &reason),
                 user_message: Some(denial_user_message(&plugin)),
-            },
+            }),
         }
     }
 }

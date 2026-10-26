@@ -28,27 +28,12 @@ is a function of the persisted conversation, not of in-memory loop state.
   session. Dynamic providers are queried before inference and again before
   execution, so their tool names and handlers must remain stable between those
   boundaries. Their schemas are sent to inference and matching calls are
-  dispatched against the current session. Pass `BeforeToolCallHook<S>`s to
-  `with_before_call_hooks` to check each call before it runs, and
-  `AfterToolCallHook<S>`s to `with_after_call_hooks` to check its result. A
-  `Deny` before the call skips it; a `Deny` after the call discards the result.
-  Either way the model gets the deny's `reason` as the tool's error. An
-  after-call deny can't undo the call; if the tool has side effects, say in the
-  `reason` that it already ran so the model doesn't call it again. Unparseable
-  calls get no hooks, and denied calls get no after-call hooks. A
-  result is saved only after its after-call hooks finish, so stopping the run
-  during them saves nothing for that call. Only `ToolOperation` runs these
-  hooks; a custom tool operation has to call them itself.
-- **`StopHookOperation<S>`** — runs `StopHook<S>`s when the model ends its turn.
-  A `Deny` keeps the turn going and sends its `reason` to the model as a hidden
-  user message. Denials are capped per turn (`with_deny_limit_per_turn`,
-  default 8); past the cap the turn ends and a message from the
-  `with_deny_limit_message` function, if set, is built, shown, and saved.
-- **`Hook<S, E>`** / **`HookDecision`** — the trait every hook implements. A
-  hook returns `Allow` or `Deny { reason, user_message }`. Hooks are asked in
-  order and the first `Deny` wins; later hooks are not asked. A deny's
-  `user_message` is a `Message` the hook builds in whatever form the app shows;
-  if present, it is shown to the user but not saved.
+  dispatched against the current session. It can also run hooks before and
+  after each call; see [Hooks](#hooks).
+- **`StopHookOperation<S>`** — runs stop hooks when the model ends its turn; see
+  [Hooks](#hooks).
+- **`Hook<S, E>`** / **`HookDecision`** — the trait every hook implements; see
+  [Hooks](#hooks).
 - **`StateMachine<'a, S, E>`** — holds `Vec<Step<..>>` and a `CancellationToken`.
   `step()` runs one pass and returns a `StepResult` whose `applied_step` names
   the step that applied (`None` if none did) and whose `status` says whether the
@@ -63,6 +48,40 @@ is a function of the persisted conversation, not of in-memory loop state.
 - **`SessionLoader`** / **`EffectHandler`** / **`MachineSession`** — the traits
   your runtime implements so the machine can load a session by id and persist
   effects. The machine reloads the session between passes; it never caches it.
+
+## Hooks
+
+A hook implements `Hook<S, E>`. Its `decide` returns one of:
+
+- `Ok(HookDecision::Allow)` — let it go ahead.
+- `Ok(HookDecision::Deny { reason, user_message })` — block it. `reason` is
+  sent to the model. `user_message`, if set, is shown to the user but not saved.
+- `Err(..)` — the hook itself failed.
+
+Hooks are asked in order. The first `Deny` or error wins, and later hooks are
+not asked. What happens next depends on the kind of hook:
+
+| Hook | Runs | On `Deny` | On error |
+| --- | --- | --- | --- |
+| Before-call, added with `ToolOperation::with_before_call_hooks` | before each tool call | The tool doesn't run. The model gets `reason` as the tool's error. | The tool doesn't run. The model gets `hook failed: <error>` as the tool's error. |
+| After-call, added with `ToolOperation::with_after_call_hooks` | after each tool call, with its result | The result is thrown away. The model gets `reason` as the tool's error. | The result is thrown away. The model gets `hook failed: <error>` as the tool's error. |
+| Stop, added with `StopHookOperation::new` | when the model ends its turn | The turn keeps going. `reason` is sent to the model as a hidden user message. | The turn ends with the error. |
+
+Things to know:
+
+- If a failure should allow or block instead, for example because it is a
+  user setting, the hook catches its own error and returns `Allow` or `Deny`.
+- An after-call hook can't undo the call. If the tool has side effects, say in
+  `reason` that it already ran, so the model doesn't call it again.
+- Calls with unparseable arguments get no hooks. Calls blocked by a before-call
+  hook get no after-call hooks.
+- A tool result is saved only after its after-call hooks finish. If the run is
+  stopped while they are running, nothing is saved for that call.
+- Stop hook denials are capped per turn (`with_deny_limit_per_turn`, default 8).
+  Past the cap, the turn ends, and the message from `with_deny_limit_message`,
+  if set, is built, shown, and saved.
+- Only `ToolOperation` runs tool hooks. A custom tool operation has to call
+  `run_hooks` itself.
 
 ## Reading the conversation
 
