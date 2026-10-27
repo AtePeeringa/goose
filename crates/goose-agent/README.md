@@ -73,6 +73,51 @@ Good to know:
   `with_deny_limit_per_turn`. To tell the user why the model stopped at the
   limit, set a message with `with_deny_limit_message`; it is shown and saved.
 
+A pre-tool hook looks at each tool call before it runs. It can let the call
+run, block it, or ask the user first. Tool approval is a pre-tool hook that
+asks.
+
+To add one, implement `PreToolCallHook<S>` and give it to
+`PreToolExecutionOperation`. Its `before_call` returns one of:
+
+- `Allow` — the call runs.
+- `Deny` — the call doesn't run. The model gets `reason` as the call's error
+  result.
+- `Ask` — the user is asked first. The question shows the tool and its
+  arguments, plus `prompt` if you set one.
+- An error — the run ends with that error.
+
+When the user answers, the hook's `on_answer` gets the answer once, so it can
+remember "always allow" or "always deny". If the user allows the call, it runs;
+otherwise it gets the declined message as its error result. Change that text
+with `with_declined_message`.
+
+Good to know:
+
+- Put `PreToolExecutionOperation` before every step that runs tools, and
+  `PostToolExecutionOperation` after them. Allowed calls run while others wait
+  for the user.
+- Show the question to the user only after it is saved, so the user can't
+  answer before it exists. The operation saves it but doesn't send it.
+- When the user answers, save `user_answer_message(call_id, permission)`. It is
+  hidden, so it isn't mistaken for a new user message.
+- Calls with arguments that can't be read skip the hook; the tool step answers
+  them with the error.
+- `PreToolExecutionOperation` takes one hook. To run several, write one hook
+  that calls the others.
+
+A post-tool hook sees each tool call's result after it is saved. It can't change
+the result. To add one, implement `PostToolCallHook<S>` and give it to
+`PostToolExecutionOperation::new().with_hook(..)`. Its `after_call` is called
+once per result, only for calls that ran. An error ends the run.
+
+`PostToolExecutionOperation` is needed with `PreToolExecutionOperation` even
+without a post-tool hook. Put it after every step that runs tools, right before
+inference. It gives calls no step handled a "not handled" error result, and it
+pauses the run while calls wait for the user, so the model isn't called with
+calls still open. A step that runs tools after it gets "not handled" for its
+calls.
+
 ## Reading the conversation
 
 Because steps re-derive their decisions from history, the crate ships the

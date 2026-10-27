@@ -19,6 +19,7 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, Emitter, Operation, OperationFuture,
     OperationResult,
 };
+use crate::pre_tool_execution::request_executable;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 
 fn empty_input_schema() -> Arc<JsonObject> {
@@ -341,7 +342,9 @@ where
             .flat_map(|message| message.content.iter())
             .filter_map(MessageContent::as_tool_request)
             .filter(|request| {
-                !request.was_executed_externally() && !answered.contains(request.id.as_str())
+                !request.was_executed_externally()
+                    && !answered.contains(request.id.as_str())
+                    && request_executable(request) != Some(false)
             })
             .cloned()
             .collect::<Vec<_>>();

@@ -14,6 +14,7 @@ use goose_agent::{
         ConversationEffect, Emitter, Inference, InferenceInput, Operation, OperationResult,
         RunStatus,
     },
+    pre_tool_execution::EXECUTABLE_KEY,
     tool::{ToolOperation, ToolProvider},
 };
 use goose_provider_types::conversation::{
@@ -506,4 +507,37 @@ async fn ignores_unavailable_answered_and_externally_dispatched_requests() {
     .unwrap();
 
     assert!(matches!(result, OperationResult::NotApplicable));
+}
+
+#[tokio::test]
+async fn skips_calls_marked_not_to_run() {
+    let call = |executable: bool| {
+        Conversation::new_unvalidated([
+            Message::user().with_text("call tools"),
+            Message::assistant().with_tool_request_with_metadata(
+                "add-call",
+                Ok(CallToolRequestParams::new("add")
+                    .with_arguments(json!({"left": 2, "right": 3}).as_object().unwrap().clone())),
+                None,
+                Some(json!({ EXECUTABLE_KEY: executable })),
+            ),
+        ])
+    };
+    let run = |conversation: Conversation| async move {
+        <ToolOperation<()> as Operation<(), ConversationEffect>>::run(
+            &operation(),
+            &(),
+            &conversation,
+            &emitter(),
+        )
+        .await
+        .unwrap()
+    };
+
+    assert!(matches!(
+        run(call(false)).await,
+        OperationResult::NotApplicable
+    ));
+    let answer = appended_message(run(call(true)).await);
+    assert!(answer.get_tool_response_ids().contains("add-call"));
 }
