@@ -14,8 +14,8 @@ use crate::operation::{
     Operation, OperationResult,
 };
 use crate::tool_call_state::{
-    add_error_answer, mark_executable, open_tool_call_states, request_executable, tool_meta_value,
-    ToolCallState,
+    add_error_response, mark_executable, open_tool_call_states, request_executable,
+    tool_meta_value, ToolCallState,
 };
 
 pub const POST_HOOK_CALLED_KEY: &str = "goose.post_hook_called";
@@ -68,7 +68,7 @@ async fn call_post_hooks<S>(
     messages: &[Message],
 ) -> Result<Vec<ConversationEffect>> {
     let contents = || messages.iter().flat_map(|message| &message.content);
-    let responses: HashMap<&str, &ToolResponse> = contents()
+    let tool_responses_by_id: HashMap<&str, &ToolResponse> = contents()
         .filter_map(MessageContent::as_tool_response)
         .map(|response| (response.id.as_str(), response))
         .collect();
@@ -77,7 +77,7 @@ async fn call_post_hooks<S>(
         if !needs_post_hook(request) {
             continue;
         }
-        let Some(response) = responses.get(request.id.as_str()) else {
+        let Some(response) = tool_responses_by_id.get(request.id.as_str()) else {
             continue;
         };
         hook.after_call(session, conversation, request, response)
@@ -90,20 +90,22 @@ async fn call_post_hooks<S>(
     Ok(effects)
 }
 
-fn answer_unhandled_calls(
+fn respond_to_unhandled_calls(
     calls: &[(ToolRequest, ToolCallState)],
     emit: &Emitter,
 ) -> Vec<ConversationEffect> {
     let mut effects = Vec::new();
-    let mut answers = Message::user();
+    let mut tool_responses = Message::user();
     for (request, state) in calls {
-        if *state != ToolCallState::Waiting {
+        if *state != ToolCallState::AwaitingConfirmation {
             effects.push(mark_executable(&request.id, false));
-            add_error_answer(&mut answers, request, NOT_HANDLED_MESSAGE);
+            add_error_response(&mut tool_responses, request, NOT_HANDLED_MESSAGE);
         }
     }
-    if !answers.content.is_empty() {
-        effects.push(ConversationEffect::AppendMessage(emit.message(answers)));
+    if !tool_responses.content.is_empty() {
+        effects.push(ConversationEffect::AppendMessage(
+            emit.message(tool_responses),
+        ));
     }
     effects
 }
@@ -137,13 +139,13 @@ where
             .into_iter()
             .filter(|(request, _)| !request.was_executed_externally())
             .collect();
-        let effects = answer_unhandled_calls(&calls, emit);
+        let effects = respond_to_unhandled_calls(&calls, emit);
         if !effects.is_empty() {
             return applied(effects.into_iter().map(E::from));
         }
         if calls
             .iter()
-            .any(|(_, state)| *state == ToolCallState::Waiting)
+            .any(|(_, state)| *state == ToolCallState::AwaitingConfirmation)
         {
             return yielded();
         }

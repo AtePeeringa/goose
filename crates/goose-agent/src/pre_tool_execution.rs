@@ -13,7 +13,7 @@ use crate::operation::{
     OperationResult,
 };
 use crate::tool_call_state::{
-    add_error_answer, mark_executable, open_tool_call_states, ToolCallState,
+    add_error_response, mark_executable, open_tool_call_states, ToolCallState,
 };
 pub use crate::tool_call_state::{request_executable, EXECUTABLE_KEY};
 
@@ -36,7 +36,7 @@ pub trait PreToolCallHook<S>: MaybeSend + MaybeSync {
         request: &ToolRequest,
     ) -> Result<PreToolCallDecision>;
 
-    async fn on_answer(
+    async fn on_confirmation(
         &self,
         _session: &S,
         _request: &ToolRequest,
@@ -46,7 +46,7 @@ pub trait PreToolCallHook<S>: MaybeSend + MaybeSync {
     }
 }
 
-pub fn user_answer_message(tool_call_id: &str, permission: Permission) -> Message {
+pub fn confirmation_response_message(tool_call_id: &str, permission: Permission) -> Message {
     Message::user()
         .with_visibility(false, false)
         .with_content(MessageContent::action_required_tool_confirmation_response(
@@ -75,7 +75,7 @@ impl<'a, S> PreToolExecutionOperation<'a, S> {
     }
 }
 
-fn question(
+fn confirmation_request(
     request: &ToolRequest,
     call: &CallToolRequestParams,
     prompt: Option<String>,
@@ -96,7 +96,7 @@ fn apply_decision(
     request: &ToolRequest,
     call: &CallToolRequestParams,
     effects: &mut Vec<ConversationEffect>,
-    answers: &mut Message,
+    tool_responses: &mut Message,
 ) {
     match decision {
         PreToolCallDecision::Allow => {
@@ -104,11 +104,11 @@ fn apply_decision(
         }
         PreToolCallDecision::Deny { reason } => {
             effects.push(mark_executable(&request.id, false));
-            add_error_answer(answers, request, &reason);
+            add_error_response(tool_responses, request, &reason);
         }
         PreToolCallDecision::Ask { prompt } => {
             effects.push(mark_executable(&request.id, false));
-            effects.push(question(request, call, prompt).into());
+            effects.push(confirmation_request(request, call, prompt).into());
         }
     }
 }
@@ -131,7 +131,7 @@ where
         emit: &Emitter,
     ) -> Result<OperationResult<E>> {
         let mut effects = Vec::new();
-        let mut answers = Message::user();
+        let mut tool_responses = Message::user();
         for (request, state) in &open_tool_call_states(messages_since_kickoff(conversation)?) {
             if request.was_executed_externally() {
                 continue;
@@ -145,24 +145,26 @@ where
                         .hook
                         .before_call(session, conversation, request)
                         .await?;
-                    apply_decision(decision, request, call, &mut effects, &mut answers);
+                    apply_decision(decision, request, call, &mut effects, &mut tool_responses);
                 }
-                ToolCallState::UserAnswered(permission) => {
-                    self.hook.on_answer(session, request, permission).await?;
+                ToolCallState::Confirmed(permission) => {
+                    self.hook
+                        .on_confirmation(session, request, permission)
+                        .await?;
                     if matches!(permission, Permission::AllowOnce | Permission::AlwaysAllow) {
                         effects.push(mark_executable(&request.id, true));
                     } else {
-                        add_error_answer(&mut answers, request, &self.declined_message);
+                        add_error_response(&mut tool_responses, request, &self.declined_message);
                     }
                 }
                 ToolCallState::Allowed
-                | ToolCallState::Waiting
-                | ToolCallState::MarkedNotRunUnanswered => {}
+                | ToolCallState::AwaitingConfirmation
+                | ToolCallState::Denied => {}
             }
         }
 
-        if !answers.content.is_empty() {
-            effects.push(emit.message(answers).into());
+        if !tool_responses.content.is_empty() {
+            effects.push(emit.message(tool_responses).into());
         }
         if effects.is_empty() {
             return not_applicable();

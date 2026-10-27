@@ -125,7 +125,7 @@ impl PreToolCallHook<Session> for GoosePreToolHook<'_> {
         self.check_approval(session, conversation, request).await
     }
 
-    async fn on_answer(
+    async fn on_confirmation(
         &self,
         _session: &Session,
         request: &ToolRequest,

@@ -194,7 +194,7 @@ where
 pub struct ToolOperation<S> {
     registered: RegisteredToolProvider<S>,
     providers: Vec<Arc<dyn ToolProvider<S>>>,
-    response: Mutex<Option<Message>>,
+    tool_responses: Mutex<Option<Message>>,
 }
 
 impl<S> ToolOperation<S>
@@ -205,7 +205,7 @@ where
         Self {
             registered: RegisteredToolProvider { tools: Vec::new() },
             providers: Vec::new(),
-            response: Mutex::new(None),
+            tool_responses: Mutex::new(None),
         }
     }
 
@@ -310,9 +310,9 @@ where
         _conversation: &Conversation,
         emit: &Emitter,
     ) -> Vec<E> {
-        let response = self.response.lock().unwrap().take();
-        match response {
-            Some(response) => vec![E::from(emit.message(response))],
+        let tool_responses = self.tool_responses.lock().unwrap().take();
+        match tool_responses {
+            Some(tool_responses) => vec![E::from(emit.message(tool_responses))],
             None => Vec::new(),
         }
     }
@@ -333,7 +333,7 @@ where
         emit: &Emitter,
     ) -> Result<OperationResult<E>> {
         let turn = messages_since_kickoff(conversation)?;
-        let answered: HashSet<&str> = turn
+        let tool_response_ids: HashSet<&str> = turn
             .iter()
             .flat_map(Message::get_tool_response_ids)
             .collect();
@@ -343,7 +343,7 @@ where
             .filter_map(MessageContent::as_tool_request)
             .filter(|request| {
                 !request.was_executed_externally()
-                    && !answered.contains(request.id.as_str())
+                    && !tool_response_ids.contains(request.id.as_str())
                     && request_executable(request) != Some(false)
             })
             .cloned()
@@ -379,22 +379,21 @@ where
                         .await
                 }
             };
-            let mut output = self.response.lock().unwrap();
-            let message =
-                output.get_or_insert_with(|| Message::user().with_generated_id_if_missing());
-            message.add_tool_response_with_metadata(
-                request.id,
-                tool_result,
-                request.metadata.as_ref(),
-            );
+            let mut tool_responses = self.tool_responses.lock().unwrap();
+            tool_responses
+                .get_or_insert_with(|| Message::user().with_generated_id_if_missing())
+                .add_tool_response_with_metadata(
+                    request.id,
+                    tool_result,
+                    request.metadata.as_ref(),
+                );
         }
-        let message = self
-            .response
+        let tool_responses = self
+            .tool_responses
             .lock()
             .unwrap()
             .take()
             .expect("tool responses retained");
-        let message = emit.message(message);
-        applied([E::from(message)])
+        applied([E::from(emit.message(tool_responses))])
     }
 }

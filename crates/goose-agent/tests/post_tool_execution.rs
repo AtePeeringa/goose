@@ -66,7 +66,7 @@ struct Outcome {
     status: Option<RunStatus>,
     hook_called_marks: Vec<String>,
     executable_marks: Vec<(String, bool)>,
-    answers: Vec<(String, String)>,
+    responses: Vec<(String, String)>,
 }
 
 async fn run_with(
@@ -102,7 +102,7 @@ async fn run_with(
             }
             ConversationEffect::AppendMessage(message) => {
                 outcome
-                    .answers
+                    .responses
                     .extend(message.content.into_iter().filter_map(|content| {
                         let MessageContent::ToolResponse(response) = content else {
                             return None;
@@ -160,13 +160,13 @@ fn unreadable_call(id: &str) -> Message {
     Message::assistant().with_tool_request(id, Err(ErrorData::invalid_params("bad json", None)))
 }
 
-fn question(id: &str) -> Message {
+fn confirmation_request(id: &str) -> Message {
     Message::assistant()
         .with_action_required(id, id.to_string(), Default::default(), None)
         .user_only()
 }
 
-fn tool_answers(ids: &[&str]) -> Message {
+fn tool_responses(ids: &[&str]) -> Message {
     ids.iter().fold(Message::user(), |message, id| {
         message.with_tool_response(
             *id,
@@ -188,7 +188,7 @@ async fn calls_the_hook_for_each_result_in_call_order_and_marks_the_call() {
             kickoff(),
             call("a", None),
             marked_call("b", true),
-            tool_answers(&["b", "a"]),
+            tool_responses(&["b", "a"]),
         ],
     )
     .await;
@@ -196,7 +196,7 @@ async fn calls_the_hook_for_each_result_in_call_order_and_marks_the_call() {
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
     assert_eq!(hook.called(), vec!["a", "b"]);
     assert_eq!(outcome.hook_called_marks, vec!["a", "b"]);
-    assert!(outcome.answers.is_empty());
+    assert!(outcome.responses.is_empty());
 }
 
 #[tokio::test]
@@ -204,7 +204,7 @@ async fn does_not_call_the_hook_twice() {
     let hook = FakeHook::new();
     let outcome = run(
         &hook,
-        vec![kickoff(), hook_called_call("a"), tool_answers(&["a"])],
+        vec![kickoff(), hook_called_call("a"), tool_responses(&["a"])],
     )
     .await;
 
@@ -225,7 +225,7 @@ async fn skips_calls_that_did_not_run() {
                 "external",
                 Some(json!({ TOOL_META_EXTERNAL_DISPATCH_KEY: true })),
             ),
-            tool_answers(&["denied", "unreadable", "external"]),
+            tool_responses(&["denied", "unreadable", "external"]),
         ],
     )
     .await;
@@ -235,7 +235,7 @@ async fn skips_calls_that_did_not_run() {
 }
 
 #[tokio::test]
-async fn calls_the_hook_before_answering_unhandled_calls() {
+async fn calls_the_hook_before_responding_to_unhandled_calls() {
     let hook = FakeHook::new();
 
     let outcome = run(
@@ -243,25 +243,25 @@ async fn calls_the_hook_before_answering_unhandled_calls() {
         vec![
             kickoff(),
             marked_call("a", true),
-            tool_answers(&["a"]),
+            tool_responses(&["a"]),
             marked_call("b", true),
         ],
     )
     .await;
     assert_eq!(outcome.hook_called_marks, vec!["a"]);
-    assert!(outcome.answers.is_empty());
+    assert!(outcome.responses.is_empty());
 
     let outcome = run(
         &hook,
         vec![
             kickoff(),
             hook_called_call("a"),
-            tool_answers(&["a"]),
+            tool_responses(&["a"]),
             marked_call("b", true),
         ],
     )
     .await;
-    assert_eq!(outcome.answers, vec![not_handled("b")]);
+    assert_eq!(outcome.responses, vec![not_handled("b")]);
     assert_eq!(hook.called(), vec!["a"]);
 }
 
@@ -270,11 +270,11 @@ async fn marks_not_handled_calls_false_so_the_hook_is_not_called() {
     let hook = FakeHook::new();
     let outcome = run(&hook, vec![kickoff(), marked_call("a", true)]).await;
     assert_eq!(outcome.executable_marks, vec![("a".to_string(), false)]);
-    assert_eq!(outcome.answers, vec![not_handled("a")]);
+    assert_eq!(outcome.responses, vec![not_handled("a")]);
 
     let outcome = run(
         &hook,
-        vec![kickoff(), marked_call("a", false), tool_answers(&["a"])],
+        vec![kickoff(), marked_call("a", false), tool_responses(&["a"])],
     )
     .await;
     assert!(outcome.status.is_none());
@@ -286,7 +286,7 @@ async fn a_hook_error_ends_the_run() {
     let operation = PostToolExecutionOperation::new().with_hook(FakeHook::failing());
     let result = run_with(
         operation,
-        vec![kickoff(), marked_call("a", true), tool_answers(&["a"])],
+        vec![kickoff(), marked_call("a", true), tool_responses(&["a"])],
     )
     .await;
 
@@ -298,31 +298,31 @@ async fn pauses_when_every_open_call_is_waiting() {
     let outcome = run_without_hook(vec![
         kickoff(),
         marked_call("a", true),
-        tool_answers(&["a"]),
+        tool_responses(&["a"]),
         marked_call("c", false),
-        question("c"),
+        confirmation_request("c"),
     ])
     .await;
 
     assert_eq!(outcome.status, Some(RunStatus::Yielded));
-    assert!(outcome.answers.is_empty());
+    assert!(outcome.responses.is_empty());
 }
 
 #[tokio::test]
-async fn answers_open_calls_that_are_not_waiting() {
+async fn responds_to_open_calls_that_are_not_awaiting_confirmation() {
     let outcome = run_without_hook(vec![
         kickoff(),
         marked_call("allowed", true),
         call("unchecked", None),
         marked_call("declined", false),
         marked_call("waiting", false),
-        question("waiting"),
+        confirmation_request("waiting"),
     ])
     .await;
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
     assert_eq!(
-        outcome.answers,
+        outcome.responses,
         vec![
             not_handled("allowed"),
             not_handled("unchecked"),
@@ -344,7 +344,7 @@ async fn does_nothing_when_no_call_is_open() {
     let outcome = run_without_hook(vec![
         kickoff(),
         marked_call("a", true),
-        tool_answers(&["a"]),
+        tool_responses(&["a"]),
         call(
             "external",
             Some(json!({ TOOL_META_EXTERNAL_DISPATCH_KEY: true })),

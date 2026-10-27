@@ -18,8 +18,8 @@ is a function of the persisted conversation, not of in-memory loop state.
 - **`Inference<S, E>`** — the step that reaches the provider. Before calling it,
   the machine collects tools and prompt parts from *every* operation in the list
   into an `InferenceInput`. It runs whenever the conversation ends on a user or
-  tool message, even if other tool calls from the same reply are still
-  unanswered. A pipeline that keeps calls open, for example while waiting for
+  tool message, even if other tool calls from the same reply still have no
+  response. A pipeline that keeps calls open, for example while waiting for
   the user to approve one, needs an operation before inference that yields
   while any call is open.
 - **`ToolOperation<S>`** — adapts caller-defined `rmcp` tools into one operation.
@@ -83,12 +83,12 @@ To add one, implement `PreToolCallHook<S>` and give it to
 - `Allow` — the call runs.
 - `Deny` — the call doesn't run. The model gets `reason` as the call's error
   result.
-- `Ask` — the user is asked first. The question shows the tool and its
-  arguments, plus `prompt` if you set one.
+- `Ask` — the user is asked to confirm first. The confirmation request shows
+  the tool and its arguments, plus `prompt` if you set one.
 - An error — the run ends with that error.
 
-When the user answers, the hook's `on_answer` gets the answer once, so it can
-remember "always allow" or "always deny". If the user allows the call, it runs;
+When the user chooses, the hook's `on_confirmation` gets the choice once, so it
+can remember "always allow" or "always deny". If the user allows the call, it runs;
 otherwise it gets the declined message as its error result. Change that text
 with `with_declined_message`.
 
@@ -97,12 +97,12 @@ Good to know:
 - Put `PreToolExecutionOperation` before every step that runs tools, and
   `PostToolExecutionOperation` after them. Allowed calls run while others wait
   for the user.
-- Show the question to the user only after it is saved, so the user can't
-  answer before it exists. The operation saves it but doesn't send it.
-- When the user answers, save `user_answer_message(call_id, permission)`. It is
-  hidden, so it isn't mistaken for a new user message.
-- Calls with arguments that can't be read skip the hook; the tool step answers
-  them with the error.
+- Show the confirmation request to the user only after it is saved, so the
+  user can't choose before it exists. The operation saves it but doesn't send it.
+- When the user chooses, save `confirmation_response_message(call_id,
+  permission)`. It is hidden, so it isn't mistaken for a new user message.
+- Calls with arguments that can't be read skip the hook; the tool step responds
+  to them with the error.
 - `PreToolExecutionOperation` takes one hook. To run several, write one hook
   that calls the others.
 
@@ -130,7 +130,7 @@ remember that it already did something, it records that on the message itself vi
 
 On Stop, the machine drops the running step's future, including inference
 preparation. It then saves the interrupted step's `finalize_cancellation`
-effects, answers every tool request since kickoff that still has no response
+effects, responds to every tool request since kickoff that still has no response
 with "Tool call was interrupted before completing", and finally calls
 `finalize_cancellation` on the remaining operations in pipeline order. Every
 operation's `finalize_cancellation` runs once, and the session is reloaded

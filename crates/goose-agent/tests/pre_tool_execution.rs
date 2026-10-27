@@ -6,8 +6,8 @@ use goose_agent::{
     events::AgentEvent,
     operation::{ConversationEffect, Emitter, Operation, OperationResult, RunStatus},
     pre_tool_execution::{
-        user_answer_message, PreToolCallDecision, PreToolCallHook, PreToolExecutionOperation,
-        DEFAULT_DECLINED_MESSAGE, EXECUTABLE_KEY,
+        confirmation_response_message, PreToolCallDecision, PreToolCallHook,
+        PreToolExecutionOperation, DEFAULT_DECLINED_MESSAGE, EXECUTABLE_KEY,
     },
 };
 use goose_provider_types::conversation::{
@@ -80,7 +80,7 @@ impl PreToolCallHook<()> for FakeHook {
         }
     }
 
-    async fn on_answer(
+    async fn on_confirmation(
         &self,
         _session: &(),
         request: &ToolRequest,
@@ -102,18 +102,18 @@ struct Outcome {
 }
 
 impl Outcome {
-    fn answers(&self) -> Vec<(String, String)> {
-        self.appended.iter().flat_map(tool_answers).collect()
+    fn responses(&self) -> Vec<(String, String)> {
+        self.appended.iter().flat_map(tool_responses).collect()
     }
 
-    fn shown_answers(&self) -> Vec<(String, String)> {
-        self.shown.iter().flat_map(tool_answers).collect()
+    fn shown_responses(&self) -> Vec<(String, String)> {
+        self.shown.iter().flat_map(tool_responses).collect()
     }
 
-    fn questions(&self) -> Vec<&Message> {
+    fn confirmation_requests(&self) -> Vec<&Message> {
         self.appended
             .iter()
-            .filter(|message| question_of(message).is_some())
+            .filter(|message| confirmation_request_of(message).is_some())
             .collect()
     }
 }
@@ -157,7 +157,7 @@ async fn run(
     Ok(outcome)
 }
 
-fn tool_answers(message: &Message) -> Vec<(String, String)> {
+fn tool_responses(message: &Message) -> Vec<(String, String)> {
     message
         .content
         .iter()
@@ -173,7 +173,7 @@ fn tool_answers(message: &Message) -> Vec<(String, String)> {
         .collect()
 }
 
-fn question_of(message: &Message) -> Option<(String, String, Option<String>)> {
+fn confirmation_request_of(message: &Message) -> Option<(String, String, Option<String>)> {
     message.content.iter().find_map(|content| match content {
         MessageContent::ActionRequired(action) => match &action.data {
             ActionRequiredData::ToolConfirmation {
@@ -207,17 +207,17 @@ fn marked_call(id: &str, executable: bool) -> Message {
     )
 }
 
-fn question(id: &str) -> Message {
+fn confirmation_request(id: &str) -> Message {
     Message::assistant()
         .with_action_required(id, id.to_string(), Default::default(), None)
         .user_only()
 }
 
 fn click(id: &str, permission: Permission) -> Message {
-    user_answer_message(id, permission)
+    confirmation_response_message(id, permission)
 }
 
-fn tool_answer(id: &str) -> Message {
+fn tool_response(id: &str) -> Message {
     Message::user().with_tool_response(
         id,
         Ok(CallToolResult::success(vec![ContentBlock::text("done")])),
@@ -240,7 +240,7 @@ async fn allow_marks_the_call_true() {
 }
 
 #[tokio::test]
-async fn deny_marks_false_and_streams_an_error_answer_with_the_reason() {
+async fn deny_marks_false_and_streams_an_error_response_with_the_reason() {
     let operation = PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Deny("no"))]));
 
     let outcome = run(&operation, vec![kickoff(), calls(&["a"])])
@@ -249,12 +249,12 @@ async fn deny_marks_false_and_streams_an_error_answer_with_the_reason() {
 
     let expected = vec![("a".to_string(), "no".to_string())];
     assert_eq!(outcome.marks, vec![("a".to_string(), false)]);
-    assert_eq!(outcome.answers(), expected);
-    assert_eq!(outcome.shown_answers(), expected);
+    assert_eq!(outcome.responses(), expected);
+    assert_eq!(outcome.shown_responses(), expected);
 }
 
 #[tokio::test]
-async fn ask_marks_false_and_saves_a_question_without_streaming_it() {
+async fn ask_marks_false_and_saves_a_confirmation_request_without_streaming_it() {
     let operation =
         PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Ask(Some("careful")))]));
 
@@ -263,20 +263,20 @@ async fn ask_marks_false_and_saves_a_question_without_streaming_it() {
         .unwrap();
 
     assert_eq!(outcome.marks, vec![("a".to_string(), false)]);
-    let questions = outcome.questions();
-    assert_eq!(questions.len(), 1);
+    let confirmation_requests = outcome.confirmation_requests();
+    assert_eq!(confirmation_requests.len(), 1);
     assert_eq!(
-        question_of(questions[0]),
+        confirmation_request_of(confirmation_requests[0]),
         Some((
             "a".to_string(),
             "a".to_string(),
             Some("careful".to_string())
         ))
     );
-    assert!(questions[0].is_user_visible());
-    assert!(!questions[0].is_agent_visible());
-    assert!(questions[0].id.is_some());
-    assert!(outcome.answers().is_empty());
+    assert!(confirmation_requests[0].is_user_visible());
+    assert!(!confirmation_requests[0].is_agent_visible());
+    assert!(confirmation_requests[0].id.is_some());
+    assert!(outcome.responses().is_empty());
     assert!(outcome.shown.is_empty());
 }
 
@@ -302,8 +302,11 @@ async fn handles_a_mixed_batch_in_one_pass() {
             ("c".to_string(), false),
         ]
     );
-    assert_eq!(outcome.answers(), vec![("b".to_string(), "no".to_string())]);
-    assert_eq!(outcome.questions().len(), 1);
+    assert_eq!(
+        outcome.responses(),
+        vec![("b".to_string(), "no".to_string())]
+    );
+    assert_eq!(outcome.confirmation_requests().len(), 1);
     assert_eq!(hook.checked(), vec!["a", "b", "c"]);
 }
 
@@ -314,7 +317,11 @@ async fn never_pauses_while_a_call_is_waiting() {
 
     let outcome = run(
         &operation,
-        vec![kickoff(), marked_call("c", false), question("c")],
+        vec![
+            kickoff(),
+            marked_call("c", false),
+            confirmation_request("c"),
+        ],
     )
     .await
     .unwrap();
@@ -333,7 +340,7 @@ async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() {
         vec![
             kickoff(),
             marked_call("c", false),
-            question("c"),
+            confirmation_request("c"),
             click("c", Permission::AlwaysAllow),
         ],
     )
@@ -352,7 +359,7 @@ async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() {
         vec![
             kickoff(),
             marked_call("c", true),
-            question("c"),
+            confirmation_request("c"),
             click("c", Permission::AlwaysAllow),
         ],
     )
@@ -364,12 +371,12 @@ async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() {
 }
 
 #[tokio::test]
-async fn a_user_deny_answers_with_the_declined_message() {
+async fn a_user_deny_responds_with_the_declined_message() {
     let conversation = || {
         vec![
             kickoff(),
             marked_call("c", false),
-            question("c"),
+            confirmation_request("c"),
             click("c", Permission::DenyOnce),
         ]
     };
@@ -383,7 +390,7 @@ async fn a_user_deny_answers_with_the_declined_message() {
     .unwrap();
     assert!(outcome.marks.is_empty());
     assert_eq!(
-        outcome.answers(),
+        outcome.responses(),
         vec![("c".to_string(), DEFAULT_DECLINED_MESSAGE.to_string())]
     );
     assert_eq!(hook.told(), vec![("c".to_string(), Permission::DenyOnce)]);
@@ -391,13 +398,13 @@ async fn a_user_deny_answers_with_the_declined_message() {
     let custom = PreToolExecutionOperation::new(FakeHook::new(&[])).with_declined_message("nope");
     let outcome = run(&custom, conversation()).await.unwrap();
     assert_eq!(
-        outcome.answers(),
+        outcome.responses(),
         vec![("c".to_string(), "nope".to_string())]
     );
 }
 
 #[tokio::test]
-async fn skips_unreadable_external_and_answered_calls() {
+async fn skips_unreadable_external_and_responded_calls() {
     let hook = FakeHook::new(&[]);
     let operation = PreToolExecutionOperation::new(hook.clone());
 
@@ -417,7 +424,7 @@ async fn skips_unreadable_external_and_answered_calls() {
                     Some(json!({ TOOL_META_EXTERNAL_DISPATCH_KEY: true })),
                 ),
             calls(&["done"]),
-            tool_answer("done"),
+            tool_response("done"),
         ],
     )
     .await
@@ -440,8 +447,8 @@ async fn a_hook_error_ends_the_run() {
 }
 
 #[test]
-fn the_user_answer_message_has_an_id_and_is_hidden_from_the_user_and_the_model() {
-    let message = user_answer_message("c", Permission::AllowOnce);
+fn the_confirmation_response_message_has_an_id_and_is_hidden_from_the_user_and_the_model() {
+    let message = confirmation_response_message("c", Permission::AllowOnce);
 
     assert!(!message.is_user_visible());
     assert!(!message.is_agent_visible());
