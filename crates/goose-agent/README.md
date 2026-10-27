@@ -29,6 +29,8 @@ is a function of the persisted conversation, not of in-memory loop state.
   execution, so their tool names and handlers must remain stable between those
   boundaries. Their schemas are sent to inference and matching calls are
   dispatched against the current session.
+- **`StopHookOperation<S>`** — runs a `StopHook` when the model gives its final
+  answer; see [Hooks](#hooks).
 - **`StateMachine<'a, S, E>`** — holds `Vec<Step<..>>` and a `CancellationToken`.
   `step()` runs one pass and returns a `StepResult` whose `applied_step` names
   the step that applied (`None` if none did) and whose `status` says whether the
@@ -43,6 +45,33 @@ is a function of the persisted conversation, not of in-memory loop state.
 - **`SessionLoader`** / **`EffectHandler`** / **`MachineSession`** — the traits
   your runtime implements so the machine can load a session by id and persist
   effects. The machine reloads the session between passes; it never caches it.
+
+## Hooks
+
+A stop hook looks at the model's final answer and can send the model back to
+work, for example when tests still fail. The final answer is a reply with no
+tool calls.
+
+To add one, implement `StopHook<S>` and give it to `StopHookOperation`. Its
+`on_stop` returns one of:
+
+- `Allow` — the model stops.
+- `Deny` — the model keeps working. It gets `reason` as a new message, which
+  the user doesn't see. If you set `user_message`, it's sent to the client to
+  show the user. It isn't added to the conversation.
+- An error — the run ends with that error. If you'd rather allow or deny when
+  something goes wrong, handle the error inside `on_stop`.
+
+Good to know:
+
+- `StopHookOperation` takes one hook. To run several, write one hook that calls
+  the others.
+- Put `StopHookOperation` after any other step that also looks at the final
+  answer. When the model stops, the steps after it don't run.
+- A hook can send the model back at most 8 times per user message, so it can't
+  keep the model working forever. Change the limit with
+  `with_deny_limit_per_turn`. To tell the user why the model stopped at the
+  limit, set a message with `with_deny_limit_message`; it is shown and saved.
 
 ## Reading the conversation
 
@@ -89,7 +118,7 @@ The crate builds for `wasm32-unknown-unknown` and runs without a tokio runtime,
 so it can be embedded in a JavaScript host. There, the clock and randomness come
 from JavaScript. Some things differ from native:
 
-- The traits you implement (`Provider`, `Operation`, `ToolProvider`,
+- The traits you implement (`Provider`, `Operation`, `ToolProvider`, `StopHook`,
   `SessionLoader`, `EffectHandler`, and the rest) do not require `Send` or
   `Sync`, and neither does `MessageStream`. So you can await JavaScript promises
   and hold host handles directly. Implement the traits with
