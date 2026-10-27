@@ -12,9 +12,7 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, ConversationEffect, Emitter, Operation,
     OperationResult,
 };
-use crate::tool_call_state::{
-    add_error_response, mark_executable, open_tool_call_states, ToolCallState,
-};
+use crate::tool_call_state::{add_error_response, mark_executable, tool_calls, ToolCallState};
 pub use crate::tool_call_state::{request_executable, EXECUTABLE_KEY};
 
 pub const DEFAULT_DECLINED_MESSAGE: &str = "The user declined to run this tool.";
@@ -132,7 +130,7 @@ where
     ) -> Result<OperationResult<E>> {
         let mut effects = Vec::new();
         let mut tool_responses = Message::user();
-        for (request, state) in &open_tool_call_states(messages_since_kickoff(conversation)?) {
+        for (request, state) in tool_calls(messages_since_kickoff(conversation)?) {
             if request.was_executed_externally() {
                 continue;
             }
@@ -157,7 +155,8 @@ where
                         add_error_response(&mut tool_responses, request, &self.declined_message);
                     }
                 }
-                ToolCallState::Allowed
+                ToolCallState::Responded(_)
+                | ToolCallState::Allowed
                 | ToolCallState::AwaitingConfirmation
                 | ToolCallState::Denied => {}
             }

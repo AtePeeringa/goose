@@ -6,7 +6,7 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use goose_provider_types::conversation::{
-    message::{Message, MessageContent, ToolRequest},
+    message::{Message, ToolRequest},
     Conversation,
 };
 use rmcp::{
@@ -19,7 +19,7 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, Emitter, Operation, OperationFuture,
     OperationResult,
 };
-use crate::tool_call_state::request_executable;
+use crate::tool_call_state::{tool_calls, ToolCallState};
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 
 fn empty_input_schema() -> Arc<JsonObject> {
@@ -333,20 +333,13 @@ where
         emit: &Emitter,
     ) -> Result<OperationResult<E>> {
         let turn = messages_since_kickoff(conversation)?;
-        let tool_response_ids: HashSet<&str> = turn
-            .iter()
-            .flat_map(Message::get_tool_response_ids)
-            .collect();
-        let pending = turn
-            .iter()
-            .flat_map(|message| message.content.iter())
-            .filter_map(MessageContent::as_tool_request)
-            .filter(|request| {
+        let pending = tool_calls(turn)
+            .into_iter()
+            .filter(|(request, state)| {
                 !request.was_executed_externally()
-                    && !tool_response_ids.contains(request.id.as_str())
-                    && request_executable(request) != Some(false)
+                    && matches!(state, ToolCallState::Unchecked | ToolCallState::Allowed)
             })
-            .cloned()
+            .map(|(request, _)| request.clone())
             .collect::<Vec<_>>();
         if pending.is_empty() {
             return not_applicable();

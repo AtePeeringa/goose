@@ -11,7 +11,8 @@ use crate::operation::{
     messages_since_kickoff, ConversationEffect, Emitter, Inference, InferenceInput, MachineEffect,
     Operation, OperationResult, RunStatus, StepResult,
 };
-use goose_provider_types::conversation::message::{Message, MessageContent};
+use crate::tool_call_state::tool_calls;
+use goose_provider_types::conversation::message::Message;
 use goose_provider_types::conversation::Conversation;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 use goose_provider_types::thinking::ThinkingEffort;
@@ -71,20 +72,9 @@ fn empty_result<E>(status: RunStatus) -> StepResult<E> {
 }
 
 fn interrupted_tool_responses(messages: &[Message]) -> Option<Message> {
-    let tool_response_ids = messages
-        .iter()
-        .flat_map(Message::get_tool_response_ids)
-        .collect::<HashSet<_>>();
-    let mut request_ids = HashSet::new();
     let mut tool_responses = Message::user();
-    for request in messages
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(MessageContent::as_tool_request)
-    {
-        if request_ids.insert(request.id.as_str())
-            && !tool_response_ids.contains(request.id.as_str())
-        {
+    for (request, state) in tool_calls(messages) {
+        if state.is_open() {
             tool_responses.add_tool_response_with_metadata(
                 request.id.clone(),
                 Ok(rmcp::model::CallToolResult::error(vec![
@@ -94,7 +84,7 @@ fn interrupted_tool_responses(messages: &[Message]) -> Option<Message> {
             );
         }
     }
-    (!tool_responses.get_tool_response_ids().is_empty()).then_some(tool_responses)
+    (!tool_responses.content.is_empty()).then_some(tool_responses)
 }
 
 fn add_tools_to_inference_input(

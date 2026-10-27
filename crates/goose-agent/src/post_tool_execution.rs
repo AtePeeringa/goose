@@ -1,11 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use goose_provider_types::conversation::message::{
-    Message, MessageContent, ToolRequest, ToolResponse,
-};
+use goose_provider_types::conversation::message::{Message, ToolRequest, ToolResponse};
 use goose_provider_types::conversation::Conversation;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 
@@ -14,8 +11,8 @@ use crate::operation::{
     Operation, OperationResult,
 };
 use crate::tool_call_state::{
-    add_error_response, mark_executable, open_tool_call_states, request_executable,
-    tool_meta_value, ToolCallState,
+    add_error_response, mark_executable, request_executable, tool_calls, tool_meta_value,
+    ToolCallState,
 };
 
 pub const POST_HOOK_CALLED_KEY: &str = "goose.post_hook_called";
@@ -65,21 +62,16 @@ async fn call_post_hooks<S>(
     hook: &dyn PostToolCallHook<S>,
     session: &S,
     conversation: &Conversation,
-    messages: &[Message],
+    calls: &[(&ToolRequest, ToolCallState<'_>)],
 ) -> Result<Vec<ConversationEffect>> {
-    let contents = || messages.iter().flat_map(|message| &message.content);
-    let tool_responses_by_id: HashMap<&str, &ToolResponse> = contents()
-        .filter_map(MessageContent::as_tool_response)
-        .map(|response| (response.id.as_str(), response))
-        .collect();
     let mut effects = Vec::new();
-    for request in contents().filter_map(MessageContent::as_tool_request) {
+    for (request, state) in calls {
+        let ToolCallState::Responded(response) = state else {
+            continue;
+        };
         if !needs_post_hook(request) {
             continue;
         }
-        let Some(response) = tool_responses_by_id.get(request.id.as_str()) else {
-            continue;
-        };
         hook.after_call(session, conversation, request, response)
             .await?;
         effects.push(ConversationEffect::PatchToolRequestMeta {
@@ -91,7 +83,7 @@ async fn call_post_hooks<S>(
 }
 
 fn respond_to_unhandled_calls(
-    calls: &[(ToolRequest, ToolCallState)],
+    calls: &[(&ToolRequest, ToolCallState<'_>)],
     emit: &Emitter,
 ) -> Vec<ConversationEffect> {
     let mut effects = Vec::new();
@@ -127,23 +119,23 @@ where
         conversation: &Conversation,
         emit: &Emitter,
     ) -> Result<OperationResult<E>> {
-        let messages = messages_since_kickoff(conversation)?;
+        let calls = tool_calls(messages_since_kickoff(conversation)?);
         if let Some(hook) = &self.hook {
-            let effects = call_post_hooks(hook.as_ref(), session, conversation, messages).await?;
+            let effects = call_post_hooks(hook.as_ref(), session, conversation, &calls).await?;
             if !effects.is_empty() {
                 return applied(effects.into_iter().map(E::from));
             }
         }
 
-        let calls: Vec<_> = open_tool_call_states(messages)
+        let open_calls: Vec<_> = calls
             .into_iter()
-            .filter(|(request, _)| !request.was_executed_externally())
+            .filter(|(request, state)| state.is_open() && !request.was_executed_externally())
             .collect();
-        let effects = respond_to_unhandled_calls(&calls, emit);
+        let effects = respond_to_unhandled_calls(&open_calls, emit);
         if !effects.is_empty() {
             return applied(effects.into_iter().map(E::from));
         }
-        if calls
+        if open_calls
             .iter()
             .any(|(_, state)| *state == ToolCallState::AwaitingConfirmation)
         {

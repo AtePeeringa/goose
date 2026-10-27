@@ -476,11 +476,11 @@ async fn cancellation_interrupts_inference_discovery() {
 }
 
 #[tokio::test]
-async fn ignores_unavailable_answered_and_externally_dispatched_requests() {
+async fn ignores_unavailable_responded_and_externally_dispatched_requests() {
     let conversation = Conversation::new_unvalidated([
         Message::user().with_text("call tools"),
         Message::assistant()
-            .with_tool_request("answered", Ok(CallToolRequestParams::new("add")))
+            .with_tool_request("responded", Ok(CallToolRequestParams::new("add")))
             .with_tool_request(
                 "unavailable",
                 Ok(CallToolRequestParams::new("not_registered")),
@@ -492,7 +492,7 @@ async fn ignores_unavailable_answered_and_externally_dispatched_requests() {
                 Some(json!({"goose.external_dispatch": true})),
             ),
         Message::user().with_tool_response(
-            "answered",
+            "responded",
             Ok(CallToolResult::structured(json!({"sum": 5}))),
         ),
     ]);
@@ -538,6 +538,6 @@ async fn skips_calls_marked_not_to_run() {
         run(call(false)).await,
         OperationResult::NotApplicable
     ));
-    let answer = appended_message(run(call(true)).await);
-    assert!(answer.get_tool_response_ids().contains("add-call"));
+    let tool_responses = appended_message(run(call(true)).await);
+    assert!(tool_responses.get_tool_response_ids().contains("add-call"));
 }

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use goose_provider_types::conversation::message::{
-    ActionRequiredData, Message, MessageContent, ToolRequest,
+    ActionRequiredData, Message, MessageContent, ToolRequest, ToolResponse,
 };
 use goose_provider_types::permission::Permission;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -9,6 +9,70 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use crate::operation::ConversationEffect;
 
 pub const EXECUTABLE_KEY: &str = "goose.executable";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ToolCallState<'a> {
+    Responded(&'a ToolResponse),
+    Unchecked,
+    Allowed,
+    Denied,
+    AwaitingConfirmation,
+    Confirmed(&'a Permission),
+}
+
+impl ToolCallState<'_> {
+    pub(crate) fn is_open(&self) -> bool {
+        !matches!(self, ToolCallState::Responded(_))
+    }
+}
+
+pub(crate) fn tool_calls(messages: &[Message]) -> Vec<(&ToolRequest, ToolCallState<'_>)> {
+    let mut request_ids = HashSet::new();
+    let mut requests = Vec::new();
+    let mut tool_responses_by_id = HashMap::new();
+    let mut confirmation_requests = HashSet::new();
+    let mut confirmations = HashMap::new();
+    for content in messages.iter().flat_map(|message| &message.content) {
+        match content {
+            MessageContent::ToolRequest(request) => {
+                if request_ids.insert(request.id.as_str()) {
+                    requests.push(request);
+                }
+            }
+            MessageContent::ToolResponse(response) => {
+                tool_responses_by_id.insert(response.id.as_str(), response);
+            }
+            MessageContent::ActionRequired(action) => match &action.data {
+                ActionRequiredData::ToolConfirmation { id, .. } => {
+                    confirmation_requests.insert(id.as_str());
+                }
+                ActionRequiredData::ToolConfirmationResponse { id, permission } => {
+                    confirmations.insert(id.as_str(), permission);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    requests
+        .into_iter()
+        .map(|request| {
+            let id = request.id.as_str();
+            let state = match (tool_responses_by_id.get(id), request_executable(request)) {
+                (Some(response), _) => ToolCallState::Responded(response),
+                (None, None) => ToolCallState::Unchecked,
+                (None, Some(true)) => ToolCallState::Allowed,
+                (None, Some(false)) if !confirmation_requests.contains(id) => ToolCallState::Denied,
+                (None, Some(false)) => match confirmations.get(id) {
+                    Some(permission) => ToolCallState::Confirmed(permission),
+                    None => ToolCallState::AwaitingConfirmation,
+                },
+            };
+            (request, state)
+        })
+        .collect()
+}
 
 pub(crate) fn tool_meta_value(request: &ToolRequest, key: &str) -> Option<bool> {
     request
@@ -35,57 +99,4 @@ pub(crate) fn add_error_response(tool_responses: &mut Message, request: &ToolReq
         Ok(CallToolResult::error(vec![ContentBlock::text(text)])),
         request.metadata.as_ref(),
     );
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ToolCallState {
-    Unchecked,
-    Allowed,
-    Denied,
-    AwaitingConfirmation,
-    Confirmed(Permission),
-}
-
-pub(crate) fn open_tool_call_states(messages: &[Message]) -> Vec<(ToolRequest, ToolCallState)> {
-    let mut tool_response_ids = HashSet::new();
-    let mut confirmation_requests = HashSet::new();
-    let mut confirmations = HashMap::new();
-    let mut requests = Vec::new();
-    for content in messages.iter().flat_map(|message| &message.content) {
-        match content {
-            MessageContent::ToolRequest(request) => requests.push(request),
-            MessageContent::ToolResponse(response) => {
-                tool_response_ids.insert(response.id.as_str());
-            }
-            MessageContent::ActionRequired(action) => match &action.data {
-                ActionRequiredData::ToolConfirmation { id, .. } => {
-                    confirmation_requests.insert(id.as_str());
-                }
-                ActionRequiredData::ToolConfirmationResponse { id, permission } => {
-                    confirmations.insert(id.as_str(), permission);
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    requests
-        .into_iter()
-        .filter(|request| !tool_response_ids.contains(request.id.as_str()))
-        .map(|request| {
-            let state = match request_executable(request) {
-                None => ToolCallState::Unchecked,
-                Some(true) => ToolCallState::Allowed,
-                Some(false) if !confirmation_requests.contains(request.id.as_str()) => {
-                    ToolCallState::Denied
-                }
-                Some(false) => match confirmations.get(request.id.as_str()) {
-                    Some(permission) => ToolCallState::Confirmed((*permission).clone()),
-                    None => ToolCallState::AwaitingConfirmation,
-                },
-            };
-            (request.clone(), state)
-        })
-        .collect()
 }

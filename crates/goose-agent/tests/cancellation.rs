@@ -163,7 +163,7 @@ impl Operation<Session> for Recorder {
 }
 
 #[tokio::test]
-async fn stop_saves_the_interrupted_step_then_unanswered_calls_then_the_rest() -> Result<()> {
+async fn stop_saves_the_interrupted_step_then_open_calls_then_the_rest() -> Result<()> {
     for (behavior, expected) in [
         (
             Behavior::HangAfterStop,
@@ -194,8 +194,7 @@ async fn stop_saves_the_interrupted_step_then_unanswered_calls_then_the_rest() -
         let emit = Emitter::new(tx, cancel);
         let runtime = Runtime::new([
             Message::user().with_text("kickoff"),
-            Message::assistant()
-                .with_tool_request("unanswered", Ok(CallToolRequestParams::new("tool"))),
+            Message::assistant().with_tool_request("open", Ok(CallToolRequestParams::new("tool"))),
         ]);
 
         let session = tokio::time::timeout(
@@ -205,8 +204,10 @@ async fn stop_saves_the_interrupted_step_then_unanswered_calls_then_the_rest() -
         .await??;
 
         assert_eq!(texts(&session), expected);
-        let answer = expected.iter().rposition(|text| text.is_empty()).unwrap();
-        assert!(interrupted(&session.0.messages()[answer].content[0]));
+        let interrupted_index = expected.iter().rposition(|text| text.is_empty()).unwrap();
+        assert!(interrupted(
+            &session.0.messages()[interrupted_index].content[0]
+        ));
         for operation in [&before, &active, &after] {
             assert_eq!(operation.cancel_calls.load(Ordering::SeqCst), 1);
         }
@@ -298,7 +299,7 @@ impl ToolProvider<Session> for FinishingTools {
 }
 
 #[tokio::test]
-async fn stop_saves_completed_results_then_answers_each_unanswered_request_once() {
+async fn stop_saves_completed_results_then_responds_to_each_open_request_once() {
     let operation = ToolOperation::new()
         .with_provider(Arc::new(FinishingTools))
         .with_sync_tool::<BlockingSyncTool>();
