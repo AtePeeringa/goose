@@ -13,8 +13,7 @@ use crate::agents::final_output_tool::{
     FINAL_OUTPUT_NOT_ALONE_MESSAGE, FINAL_OUTPUT_TOOL_NAME,
 };
 use crate::agents::state_machine::ops_toolcalling::{
-    emit_post_tool_use, pending_advertised_tool_requests, run_pre_tool_hooks, tool_span,
-    ToolDisposition,
+    answered_without_running, pending_advertised_tool_requests, tool_span, ToolDisposition,
 };
 use crate::agents::state_machine::{
     applied, ends_turn, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect,
@@ -25,7 +24,6 @@ use crate::config::extensions::is_extension_available;
 use crate::config::GooseMode;
 use crate::conversation::message::{Message, MessageContent};
 use crate::conversation::Conversation;
-use crate::hooks::HookManager;
 use crate::providers::base::Provider;
 use crate::session::Session;
 
@@ -84,20 +82,14 @@ pub(crate) fn recipe_prompt_parts(session: &Session) -> Result<Vec<(String, Stri
 pub struct RecipeOperation {
     provider: Arc<dyn Provider>,
     extension_manager: Arc<ExtensionManager>,
-    hook_manager: HookManager,
     response: std::sync::Mutex<Option<Message>>,
 }
 
 impl RecipeOperation {
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        extension_manager: Arc<ExtensionManager>,
-        hook_manager: HookManager,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, extension_manager: Arc<ExtensionManager>) -> Self {
         Self {
             provider,
             extension_manager,
-            hook_manager,
             response: std::sync::Mutex::default(),
         }
     }
@@ -283,8 +275,7 @@ impl Operation<Session, GooseEffect> for RecipeOperation {
                     )])),
                     request.metadata.as_ref(),
                 );
-                let response = emit.message(response);
-                return applied([response.into()]);
+                return applied(answered_without_running(response, emit));
             }
             if has_sibling_tool_calls(messages, &request.id) {
                 let mut response = Message::user();
@@ -297,77 +288,34 @@ impl Operation<Session, GooseEffect> for RecipeOperation {
                     )),
                     request.metadata.as_ref(),
                 );
-                let response = emit.message(response);
-                return applied([response.into()]);
+                return applied(answered_without_running(response, emit));
             }
 
             let tool_call = request
                 .tool_call
                 .map_err(|error| anyhow!("final output tool call could not be parsed: {error}"))?;
             let span = tool_span(&tool_call.name, &request.id, &session.id);
-            // `recipe__final_output` is executed here rather than by
-            // ToolExecutionOperation, which is registered after this one. Run the
-            // same hook lifecycle it would have run there.
-            let tool_input = tool_call
-                .arguments
-                .as_ref()
-                .map(|arguments| serde_json::Value::Object(arguments.clone()));
-            let pre_tool = run_pre_tool_hooks(
-                &self.hook_manager,
-                session,
-                &request.id,
-                &tool_call.name,
-                tool_input.as_ref(),
-            )
-            .instrument(span.clone())
-            .await;
-            let output = match &pre_tool {
-                // A denial returns before execution and emits no post event, the
-                // same shape ToolExecutionOperation has: its dispatch returns the
-                // denial before the post-hook wrapper is ever applied.
-                Err(denial) => Err(denial.clone()),
-                Ok(()) => {
-                    let result = final_output
-                        .execute_tool_call(tool_call.clone())
-                        .instrument(span.clone())
-                        .await;
-                    let output = result.result.instrument(span.clone()).await;
-                    match &output {
-                        Ok(result) if result.is_error == Some(true) => {
-                            span.record("error.type", "tool_error");
-                        }
-                        Err(_) => {
-                            span.record("error.type", "tool_execution_error");
-                        }
-                        _ => {}
-                    }
-                    output
+            let result = final_output
+                .execute_tool_call(tool_call)
+                .instrument(span.clone())
+                .await;
+            let output = result.result.instrument(span.clone()).await;
+            match &output {
+                Ok(result) if result.is_error == Some(true) => {
+                    span.record("error.type", "tool_error");
                 }
-            };
+                Err(_) => {
+                    span.record("error.type", "tool_execution_error");
+                }
+                _ => {}
+            }
             let mut response = Message::user().with_generated_id_if_missing();
             response.add_tool_response_with_metadata(
                 request.id.clone(),
-                output.clone(),
+                output,
                 request.metadata.as_ref(),
             );
             *self.response.lock().unwrap() = Some(response);
-            if pre_tool.is_ok() {
-                // Post event carries the same tool_call_id as the pre events.
-                // The large-response rewrite ToolExecutionOperation applies is
-                // deliberately not reused: the recipe's structured output is
-                // the deliverable, not a payload to offload to a temp file.
-                emit_post_tool_use(
-                    &self.hook_manager,
-                    &session.id,
-                    &session.working_dir.to_string_lossy(),
-                    &tool_call.name,
-                    &request.id,
-                    tool_input.as_ref(),
-                    &output,
-                )
-                .instrument(span.clone())
-                .await;
-            }
             let response = self.take_response().expect("recipe response held");
             let response = emit.message(response);
             let Some(accepted) = final_output.final_output.take() else {

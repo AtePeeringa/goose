@@ -9,13 +9,15 @@ use crate::agents::extension_manager::{ExtensionLease, ExtensionManager};
 use crate::agents::state_machine::{
     deny_limit_warning, BangShellOperation, CompactionOperation, DoctorOperation,
     EmptyResponseOperation, ExitOnErrorOperation, GooseEffect, GooseInferenceProvider,
-    GooseInferenceRequestPreparer, GooseStopHook, InferenceRunner, MaxTurnsOperation, Operation,
-    ProjectOperation, RecipeOperation, RemainingToolCallsOperation, RetryOperation, SkillOperation,
-    SlashCommandOperation, StateMachine, StatusOperation, SteerOperation, SteerQueue, Step,
-    StopHookOperation, SubagentOperation, ToolApprovalOperation, ToolExecutionOperation,
+    GooseInferenceRequestPreparer, GoosePostToolHook, GoosePreToolHook, GooseStopHook,
+    InferenceRunner, MaxTurnsOperation, Operation, PostToolExecutionOperation,
+    PreToolExecutionOperation, ProjectOperation, RecipeOperation, RemainingToolCallsOperation,
+    RetryOperation, SkillOperation, SlashCommandOperation, StateMachine, StatusOperation,
+    SteerOperation, SteerQueue, Step, StopHookOperation, SubagentOperation, ToolExecutionOperation,
     ToolPairCompactionOperation,
 };
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
+use crate::agents::tool_execution::DECLINED_RESPONSE;
 use crate::config::Config;
 use crate::hooks::HookManager;
 use crate::providers::base::Provider;
@@ -71,15 +73,17 @@ pub(crate) fn build_state_machine(
     let manages_own_context = provider.manages_own_context();
 
     let mut operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
-        Arc::new(ToolApprovalOperation::new(tool_inspection_manager)),
-        Arc::new(SkillOperation::new(
-            hook_manager.clone(),
-            Arc::clone(&extension_lease),
-        )),
+        Arc::new(
+            PreToolExecutionOperation::new(Arc::new(GoosePreToolHook::new(
+                hook_manager.clone(),
+                tool_inspection_manager,
+            )))
+            .with_declined_message(DECLINED_RESPONSE),
+        ),
+        Arc::new(SkillOperation::new(Arc::clone(&extension_lease))),
         Arc::new(RecipeOperation::new(
             provider.clone(),
             Arc::clone(&extension_manager),
-            hook_manager.clone(),
         )),
         Arc::new(ToolExecutionOperation::new(
             Arc::clone(&extension_manager),
@@ -87,6 +91,10 @@ pub(crate) fn build_state_machine(
             Arc::clone(&extension_lease),
         )),
         Arc::new(RemainingToolCallsOperation::new(hook_manager.clone())),
+        Arc::new(
+            PostToolExecutionOperation::new()
+                .with_hook(Arc::new(GoosePostToolHook::new(hook_manager.clone()))),
+        ),
         Arc::new(
             SubagentOperation::new(Arc::new(subagent_runner)).with_max_concurrency(
                 Config::global()

@@ -1,4 +1,4 @@
-//! Answers tool requests that no other operation handled, and waits while any await approval.
+//! Answers tool requests that no other operation handled.
 
 use std::collections::HashSet;
 
@@ -10,11 +10,11 @@ use tracing_futures::Instrument;
 use crate::agents::final_output_tool::FINAL_OUTPUT_TOOL_NAME;
 use crate::agents::state_machine::effects::GooseEffect;
 use crate::agents::state_machine::ops_toolcalling::{
-    emit_extended_pre_hooks, emit_post_tool_use, pending_tool_requests, request_was_advertised,
-    run_pre_tool_hooks, tool_span, ToolDisposition,
+    answered_without_running, emit_extended_pre_hooks, pending_tool_requests,
+    request_was_advertised, tool_span, ToolDisposition,
 };
 use crate::agents::state_machine::{
-    applied, messages_since_kickoff, not_applicable, pending_tool_confirmations, yielded, Emitter,
+    applied, messages_since_kickoff, not_applicable, pending_tool_confirmations, Emitter,
     Operation, OperationResult,
 };
 use crate::agents::tool_execution::{CHAT_MODE_TOOL_SKIPPED_RESPONSE, DECLINED_RESPONSE};
@@ -113,10 +113,10 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
                 .collect();
             let unhandled = unanswered_tool_requests(messages, &awaiting_approval);
             if !unhandled.is_empty() {
-                return applied([emit.message(not_handled_response(&unhandled)).into()]);
-            }
-            if !awaiting_approval.is_empty() {
-                return yielded();
+                return applied(answered_without_running(
+                    not_handled_response(&unhandled),
+                    emit,
+                ));
             }
             return not_applicable();
         }
@@ -158,64 +158,33 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
                                 .arguments
                                 .as_ref()
                                 .map(|arguments| serde_json::Value::Object(arguments.clone()));
-                            match run_pre_tool_hooks(
+                            emit_extended_pre_hooks(
                                 &self.hook_manager,
-                                session,
-                                &request.id,
                                 &tool_call.name,
                                 tool_input.as_ref(),
+                                session,
                             )
                             .instrument(span.clone())
-                            .await
-                            {
-                                Err(denial) => (Err(denial), false),
-                                Ok(()) => {
-                                    emit_extended_pre_hooks(
-                                        &self.hook_manager,
-                                        &tool_call.name,
-                                        tool_input.as_ref(),
-                                        session,
-                                    )
-                                    .instrument(span.clone())
-                                    .await;
-                                    let (output, unclaimed) =
-                                        if tool_call.name == FINAL_OUTPUT_TOOL_NAME
-                                            && !active_final_output
-                                        {
-                                            span.record("error.type", "final_output_not_defined");
-                                            (
-                                                Err(ErrorData::new(
-                                                    ErrorCode::INTERNAL_ERROR,
-                                                    "Final output tool not defined".to_string(),
-                                                    None,
-                                                )),
-                                                false,
-                                            )
-                                        } else {
-                                            span.record("error.type", "tool_not_available");
-                                            (
-                                                Ok(CallToolResult::error(vec![
-                                                    ContentBlock::text(format!(
-                                                        "Tool '{}' is not available.",
-                                                        tool_call.name
-                                                    )),
-                                                ])),
-                                                true,
-                                            )
-                                        };
-                                    emit_post_tool_use(
-                                        &self.hook_manager,
-                                        &session.id,
-                                        &session.working_dir.to_string_lossy(),
-                                        &tool_call.name,
-                                        &request.id,
-                                        tool_input.as_ref(),
-                                        &output,
-                                    )
-                                    .instrument(span.clone())
-                                    .await;
-                                    (output, unclaimed)
-                                }
+                            .await;
+                            if tool_call.name == FINAL_OUTPUT_TOOL_NAME && !active_final_output {
+                                span.record("error.type", "final_output_not_defined");
+                                (
+                                    Err(ErrorData::new(
+                                        ErrorCode::INTERNAL_ERROR,
+                                        "Final output tool not defined".to_string(),
+                                        None,
+                                    )),
+                                    false,
+                                )
+                            } else {
+                                span.record("error.type", "tool_not_available");
+                                (
+                                    Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                                        "Tool '{}' is not available.",
+                                        tool_call.name
+                                    ))])),
+                                    true,
+                                )
                             }
                         }
                         Err(error) => (
@@ -242,18 +211,17 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
             response.add_tool_response_with_metadata(request.id, result, metadata.as_ref());
         }
 
-        let response = emit.message(response);
-        applied([response.into()])
+        applied(answered_without_running(response, emit))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::state_machine::ops_tool_approval::TOOL_EXECUTABLE_KEY;
     use crate::agents::state_machine::{ConversationEffect, RunStatus};
     use crate::conversation::message::TOOL_META_EXTERNAL_DISPATCH_KEY;
     use crate::recipe::{Recipe, Response};
+    use goose_agent::pre_tool_execution::EXECUTABLE_KEY;
     use rmcp::model::CallToolRequestParams;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -318,25 +286,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_awaiting_approval_yields() -> Result<()> {
+    async fn a_call_awaiting_approval_is_left_to_the_post_step() -> Result<()> {
         let messages = vec![
             Message::user().with_text("run it"),
             Message::assistant().with_tool_request_with_metadata(
                 "call",
                 Ok(CallToolRequestParams::new("shell")),
                 None,
-                Some(serde_json::json!({ TOOL_EXECUTABLE_KEY: false })),
+                Some(serde_json::json!({ EXECUTABLE_KEY: false })),
             ),
             Message::assistant()
                 .with_action_required("call", "shell".to_string(), Default::default(), None)
                 .user_only(),
         ];
 
-        let OperationResult::Applied(step) = run(&Session::default(), messages).await? else {
-            panic!("expected the operation to yield");
-        };
-        assert_eq!(step.status, RunStatus::Yielded);
-        assert!(step.effects.is_empty());
+        assert!(matches!(
+            run(&Session::default(), messages).await?,
+            OperationResult::NotApplicable
+        ));
         Ok(())
     }
 
@@ -368,11 +335,16 @@ mod tests {
             panic!("expected the operation to answer the call");
         };
         assert_eq!(step.status, RunStatus::Continuing);
-        let [GooseEffect::Conversation(ConversationEffect::AppendMessage(message))] =
+        let [GooseEffect::Conversation(ConversationEffect::PatchToolRequestMeta {
+            tool_call_id,
+            patch,
+        }), GooseEffect::Conversation(ConversationEffect::AppendMessage(message))] =
             step.effects.as_slice()
         else {
-            panic!("expected one answer message");
+            panic!("expected the call marked not run and one answer message");
         };
+        assert_eq!(tool_call_id, "final");
+        assert_eq!(patch, &serde_json::json!({ EXECUTABLE_KEY: false }));
         let response = message.content[0].as_tool_response().unwrap();
         assert_eq!(response.id, "final");
         let result = response.tool_result.as_ref().unwrap();

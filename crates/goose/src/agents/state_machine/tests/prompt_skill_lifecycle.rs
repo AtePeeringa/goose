@@ -6,13 +6,13 @@ use super::pipeline::{
     test_pipeline, MessageKind::Agent, MessageKind::ToolResponse, MessageKind::User,
 };
 #[cfg(feature = "code-mode")]
-use crate::agents::state_machine::ops_tool_approval::TOOL_EXECUTABLE_KEY;
-#[cfg(feature = "code-mode")]
 use crate::config::permission::PermissionLevel;
 #[cfg(feature = "code-mode")]
 use crate::config::GooseMode;
 #[cfg(feature = "code-mode")]
 use crate::conversation::message::MessageContent;
+#[cfg(feature = "code-mode")]
+use goose_agent::pre_tool_execution::EXECUTABLE_KEY;
 
 #[tokio::test]
 async fn prompt_and_skill_lifecycle() -> Result<()> {
@@ -185,7 +185,7 @@ async fn unadvertised_load_skill_is_neither_approved_nor_loaded() -> Result<()> 
     assert!(request
         .tool_meta
         .as_ref()
-        .and_then(|metadata| metadata.get(TOOL_EXECUTABLE_KEY))
+        .and_then(|metadata| metadata.get(EXECUTABLE_KEY))
         .is_none());
 
     Ok(())

@@ -1315,13 +1315,15 @@ async fn recipe_final_output_denied_by_permission_receives_declined_response() -
         "the declined call must get one DECLINED_RESPONSE"
     );
 
-    assert!(
-        env.payloads("pre.log").is_empty(),
-        "no PreToolUse on decline"
+    assert_eq!(
+        env.payloads("pre.log").len(),
+        1,
+        "PreToolUse runs before the permission check"
     );
-    assert!(
-        env.payloads("result.log").is_empty(),
-        "no PreToolUseResult on decline"
+    assert_eq!(
+        env.payloads("result.log").len(),
+        1,
+        "PreToolUseResult runs before the permission check"
     );
     assert!(
         env.payloads("post.log").is_empty(),
@@ -1484,14 +1486,19 @@ async fn pre_tool_use_hook_failure_blocks_when_configured() -> Result<()> {
         .iter()
         .flat_map(|message| &message.content)
         .find_map(|content| match content {
-            MessageContent::ToolResponse(response) => response.tool_result.as_ref().err(),
+            MessageContent::ToolResponse(response) => response
+                .tool_result
+                .as_ref()
+                .ok()
+                .filter(|result| result.is_error == Some(true))
+                .and_then(|result| result.content[0].as_text())
+                .map(|text| text.text.clone()),
             _ => None,
         })
         .expect("blocked tool response");
     assert!(
-        tool_error.message.ends_with(HOOK_FAILURE_REFUSAL),
-        "expected the shared refusal, got {}",
-        tool_error.message
+        tool_error.ends_with(HOOK_FAILURE_REFUSAL),
+        "expected the shared refusal, got {tool_error}"
     );
     Ok(())
 }

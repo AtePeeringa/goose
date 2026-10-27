@@ -10,12 +10,11 @@ use rmcp::model::{CallToolResult, ContentBlock, ErrorData, JsonObject, Tool};
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
-use tracing_futures::Instrument;
 
 use crate::agents::extension_manager::ExtensionLease;
 use crate::agents::state_machine::ops_toolcalling::{
-    emit_post_tool_use, pending_advertised_tool_requests, run_pre_tool_hooks, tool_span,
-    ToolDisposition, EXPIRED_APPROVAL_RESPONSE,
+    mark_not_run, pending_advertised_tool_requests, tool_span, ToolDisposition,
+    EXPIRED_APPROVAL_RESPONSE,
 };
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect, Emitter,
@@ -25,13 +24,11 @@ use crate::agents::tool_execution::{CHAT_MODE_TOOL_SKIPPED_RESPONSE, DECLINED_RE
 use crate::config::GooseMode;
 use crate::conversation::message::Message;
 use crate::conversation::Conversation;
-use crate::hooks::HookManager;
 use crate::session::Session;
 
 const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 
 pub struct SkillOperation {
-    hook_manager: HookManager,
     extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
 }
 
@@ -195,14 +192,8 @@ fn load_supporting_file(
 }
 
 impl SkillOperation {
-    pub fn new(
-        hook_manager: HookManager,
-        extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
-    ) -> Self {
-        Self {
-            hook_manager,
-            extension_lease,
-        }
+    pub fn new(extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>) -> Self {
+        Self { extension_lease }
     }
 
     fn leased_session(&self, session: &Session) -> Option<Session> {
@@ -340,16 +331,18 @@ impl Operation<Session, GooseEffect> for SkillOperation {
 
         let leased_session = self.leased_session(session);
         let mut response = Message::user();
+        let mut effects = Vec::new();
         for (request, disposition) in pending {
             let result: std::result::Result<CallToolResult, ErrorData> = match disposition {
                 ToolDisposition::Execute if session.goose_mode == GooseMode::Chat => {
-                    // Nothing executes in chat mode, so no tool lifecycle runs.
+                    effects.push(mark_not_run(&request.id));
                     Ok(CallToolResult::success(vec![ContentBlock::text(
                         CHAT_MODE_TOOL_SKIPPED_RESPONSE,
                     )]))
                 }
                 ToolDisposition::Execute => {
                     let Some(session) = leased_session.as_ref() else {
+                        effects.push(mark_not_run(&request.id));
                         response.add_tool_response_with_metadata(
                             request.id,
                             Ok(CallToolResult::error(vec![ContentBlock::text(
@@ -363,56 +356,14 @@ impl Operation<Session, GooseEffect> for SkillOperation {
                         anyhow!("load_skill tool call could not be parsed: {error}")
                     })?;
                     let span = tool_span(&tool_call.name, &request.id, &session.id);
-                    // `load_skill` is executed here rather than by
-                    // ToolExecutionOperation, which is registered after this one.
-                    // Run the same hook lifecycle it would have run there.
-                    let tool_input = tool_call
-                        .arguments
-                        .as_ref()
-                        .map(|arguments| Value::Object(arguments.clone()));
-                    match run_pre_tool_hooks(
-                        &self.hook_manager,
-                        session,
-                        &request.id,
-                        &tool_call.name,
-                        tool_input.as_ref(),
-                    )
-                    .instrument(span.clone())
-                    .await
-                    {
-                        // A denial returns before execution and emits no post
-                        // event, the same shape ToolExecutionOperation has: its
-                        // dispatch returns the denial before the post-hook wrapper
-                        // is ever applied.
-                        Err(denial) => Err(denial),
-                        Ok(()) => {
-                            let result = {
-                                let _entered = span.enter();
-                                execute_skill(&session.working_dir, tool_call.arguments.clone())
-                            };
-                            if result.is_error == Some(true) {
-                                span.record("error.type", "tool_error");
-                            }
-                            let output = Ok(result);
-                            // Post event carries the same tool_call_id as the pre
-                            // events. The large-response rewrite
-                            // ToolExecutionOperation applies is deliberately not
-                            // reused: a skill body is content the model is meant to
-                            // read, not a payload to offload to a temp file.
-                            emit_post_tool_use(
-                                &self.hook_manager,
-                                &session.id,
-                                &session.working_dir.to_string_lossy(),
-                                &tool_call.name,
-                                &request.id,
-                                tool_input.as_ref(),
-                                &output,
-                            )
-                            .instrument(span.clone())
-                            .await;
-                            output
-                        }
+                    let result = {
+                        let _entered = span.enter();
+                        execute_skill(&session.working_dir, tool_call.arguments.clone())
+                    };
+                    if result.is_error == Some(true) {
+                        span.record("error.type", "tool_error");
                     }
+                    Ok(result)
                 }
                 ToolDisposition::Decline => Ok(CallToolResult::error(vec![ContentBlock::text(
                     DECLINED_RESPONSE,
@@ -425,8 +376,8 @@ impl Operation<Session, GooseEffect> for SkillOperation {
             };
             response.add_tool_response_with_metadata(request.id, result, request.metadata.as_ref());
         }
-        let response = emit.message(response);
-        applied([response.into()])
+        effects.push(emit.message(response).into());
+        applied(effects)
     }
 }
 

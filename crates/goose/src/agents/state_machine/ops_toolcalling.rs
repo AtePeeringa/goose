@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
+use goose_agent::pre_tool_execution::{request_executable, EXECUTABLE_KEY};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, Role, Tool};
 
 use crate::agents::extension_manager::{CallRequest, ExtensionLease, ExtensionManager};
 use crate::agents::state_machine::ops_llm::{ADVERTISED_TOOLS_NOTE, LLM_OPERATION_NAME};
-use crate::agents::state_machine::ops_tool_approval::request_executable;
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect, Emitter,
     GooseEffect, Operation, OperationResult, SlashCommand,
@@ -24,7 +24,7 @@ use crate::conversation::message::{
 };
 use crate::conversation::Conversation;
 use crate::hints::load_hints::SubdirectoryHintTracker;
-use crate::hooks::{HookChainOutcome, HookContext, HookEvent, HookManager};
+use crate::hooks::{HookChainOutcome, HookContext, HookDenial, HookEvent, HookManager};
 use crate::session::Session;
 
 pub(super) const EXPIRED_APPROVAL_RESPONSE: &str =
@@ -108,21 +108,13 @@ async fn emit_pre_tool_use_result(
     hook_manager.emit_pre_tool_use_result(context).await;
 }
 
-/// Runs the `PreToolUse` chain, emits `PreToolUseResult`, and reports a denial
-/// as the error the caller must return instead of executing.
-///
-/// Shared rather than duplicated because it carries policy: which decisions
-/// block, what `policy_evaluated` means, and that the result event is emitted
-/// on both the allow and the deny path. `RecipeOperation` executes
-/// `recipe__final_output` without going through [`ToolExecutionOperation`], so
-/// it calls this to get the identical lifecycle rather than its own copy.
-pub(super) async fn run_pre_tool_hooks(
+pub(super) async fn pre_tool_use_denial(
     hook_manager: &HookManager,
     session: &Session,
     tool_call_id: &str,
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
-) -> std::result::Result<(), ErrorData> {
+) -> Option<HookDenial> {
     let outcome = if hook_manager.has_hooks(HookEvent::PreToolUse) {
         let context = HookContext::new(HookEvent::PreToolUse, &session.id)
             .with_tool(tool_name.to_string(), tool_input.cloned())
@@ -148,15 +140,7 @@ pub(super) async fn run_pre_tool_hooks(
     )
     .await;
 
-    if let Some(denial) = outcome.denial() {
-        tracing::Span::current().record("error.type", denial.error_type);
-        return Err(ErrorData::new(
-            rmcp::model::ErrorCode::INTERNAL_ERROR,
-            denial.message,
-            None,
-        ));
-    }
-    Ok(())
+    outcome.denial()
 }
 
 async fn emit_with_matcher(
@@ -207,12 +191,40 @@ pub(super) async fn emit_extended_pre_hooks(
     }
 }
 
+pub(super) async fn emit_extended_post_hooks(
+    hook_manager: &HookManager,
+    tool_name: &str,
+    tool_input: Option<&serde_json::Value>,
+    session: &Session,
+) {
+    let (event, matcher) = match categorize_tool(tool_name) {
+        ToolCategory::Shell => (
+            HookEvent::AfterShellExecution,
+            tool_input.and_then(|input| string_argument(input, &["command"])),
+        ),
+        ToolCategory::Write => (
+            HookEvent::AfterFileEdit,
+            tool_input.and_then(|input| string_argument(input, &["path", "file", "file_path"])),
+        ),
+        ToolCategory::Read | ToolCategory::Other => return,
+    };
+    if let Some(matcher) = matcher {
+        emit_with_matcher(
+            hook_manager,
+            event,
+            session,
+            matcher,
+            tool_name,
+            tool_input.cloned(),
+        )
+        .await;
+    }
+}
+
 /// Emits the post-tool event for a finished call and reports which one fired.
 ///
 /// Which event fires is policy: a result flagged `is_error` counts as a failure,
-/// as does a transport error. Shared so every execution path classifies the
-/// outcome the same way. Takes the session id and working dir as strings because
-/// the caller inside [`with_post_tool_hooks`] holds owned copies, not a session.
+/// as does a transport error.
 pub(super) async fn emit_post_tool_use(
     hook_manager: &HookManager,
     session_id: &str,
@@ -234,6 +246,25 @@ pub(super) async fn emit_post_tool_use(
         hook_manager.emit(event, context).await;
     }
     event
+}
+
+pub(super) fn mark_not_run(tool_call_id: &str) -> GooseEffect {
+    ConversationEffect::PatchToolRequestMeta {
+        tool_call_id: tool_call_id.to_string(),
+        patch: serde_json::json!({ EXECUTABLE_KEY: false }),
+    }
+    .into()
+}
+
+pub(super) fn answered_without_running(response: Message, emit: &Emitter) -> Vec<GooseEffect> {
+    let mut effects: Vec<GooseEffect> = response
+        .content
+        .iter()
+        .filter_map(MessageContent::as_tool_response)
+        .map(|answer| mark_not_run(&answer.id))
+        .collect();
+    effects.push(emit.message(response).into());
+    effects
 }
 
 #[derive(Default)]
@@ -262,29 +293,15 @@ impl ToolBatch {
     }
 }
 
-/// Wraps a tool result so the post-tool event fires once the call completes,
-/// carrying the same `tool_call_id` the pre events carried.
-fn with_post_tool_hooks(
-    hook_manager: &HookManager,
+fn recording_result(
     batch: &Arc<StdMutex<ToolBatch>>,
     result: ToolCallResult,
-    tool_call: &CallToolRequestParams,
-    session: &Session,
     span: tracing::Span,
     request: &ToolRequest,
 ) -> ToolCallResult {
-    let hook_manager = hook_manager.clone();
     let batch = Arc::clone(batch);
-    let session_id = session.id.clone();
-    let working_dir = session.working_dir.to_string_lossy().to_string();
-    let tool_name = tool_call.name.to_string();
     let tool_call_id = request.id.clone();
     let metadata = request.metadata.clone();
-    let tool_input = tool_call
-        .arguments
-        .as_ref()
-        .map(|arguments| serde_json::Value::Object(arguments.clone()));
-    let category = categorize_tool(&tool_name);
     let future = async move {
         let result =
             crate::agents::large_response_handler::process_tool_response(result.result.await);
@@ -301,43 +318,6 @@ fn with_post_tool_hooks(
                 tracing::Span::current().record("error.type", "tool_execution_error");
             }
             _ => {}
-        }
-        let event = emit_post_tool_use(
-            &hook_manager,
-            &session_id,
-            &working_dir,
-            &tool_name,
-            &tool_call_id,
-            tool_input.as_ref(),
-            &result,
-        )
-        .await;
-
-        if event == HookEvent::PostToolUse {
-            let extended = match category {
-                ToolCategory::Shell => Some((
-                    HookEvent::AfterShellExecution,
-                    tool_input
-                        .as_ref()
-                        .and_then(|input| string_argument(input, &["command"])),
-                )),
-                ToolCategory::Write => Some((
-                    HookEvent::AfterFileEdit,
-                    tool_input
-                        .as_ref()
-                        .and_then(|input| string_argument(input, &["path", "file", "file_path"])),
-                )),
-                ToolCategory::Read | ToolCategory::Other => None,
-            };
-            if let Some((event, Some(matcher))) = extended {
-                if hook_manager.has_hooks(event) {
-                    let mut context = HookContext::new(event, &session_id)
-                        .with_tool(tool_name, tool_input)
-                        .with_working_dir(working_dir);
-                    context.matcher_context = Some(matcher);
-                    hook_manager.emit(event, context).await;
-                }
-            }
         }
         result
     }
@@ -420,15 +400,6 @@ impl ToolExecutionOperation {
                 .arguments
                 .as_ref()
                 .map(|arguments| serde_json::Value::Object(arguments.clone()));
-            run_pre_tool_hooks(
-                &self.hook_manager,
-                session,
-                request_id.as_str(),
-                &tool_call.name,
-                tool_input.as_ref(),
-            )
-            .await?;
-
             emit_extended_pre_hooks(
                 &self.hook_manager,
                 &tool_call.name,
@@ -455,15 +426,7 @@ impl ToolExecutionOperation {
             let result = self
                 .extension_manager
                 .applying_mutation(result, &session.id);
-            Ok(with_post_tool_hooks(
-                &self.hook_manager,
-                &self.batch,
-                result,
-                &tool_call,
-                session,
-                result_span,
-                request,
-            ))
+            Ok(recording_result(&self.batch, result, result_span, request))
         }
         .instrument(span)
         .await
@@ -963,8 +926,7 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
                     request.metadata.as_ref(),
                 );
             }
-            let response = emit.message(response);
-            return applied([response.into()]);
+            return applied(answered_without_running(response, emit));
         };
 
         let known_tools: HashSet<_> = lease
@@ -1003,8 +965,7 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
                     request.metadata.as_ref(),
                 );
             }
-            let response = emit.message(response);
-            return applied([response.into()]);
+            return applied(answered_without_running(response, emit));
         }
 
         let mut tool_streams = Vec::new();
