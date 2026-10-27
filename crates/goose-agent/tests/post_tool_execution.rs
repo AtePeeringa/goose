@@ -221,7 +221,11 @@ async fn skips_calls_that_did_not_run() {
             kickoff(),
             marked_call("denied", false),
             unreadable_call("unreadable"),
-            tool_answers(&["denied", "unreadable"]),
+            call(
+                "external",
+                Some(json!({ TOOL_META_EXTERNAL_DISPATCH_KEY: true })),
+            ),
+            tool_answers(&["denied", "unreadable", "external"]),
         ],
     )
     .await;

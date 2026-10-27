@@ -9,3 +9,4 @@ pub mod skills;
 pub mod stop_hook;
 pub mod subagent;
 pub mod tool;
+mod tool_call_state;

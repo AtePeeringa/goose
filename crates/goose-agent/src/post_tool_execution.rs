@@ -13,8 +13,9 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, yielded, ConversationEffect, Emitter,
     Operation, OperationResult,
 };
-use crate::pre_tool_execution::{
-    add_error_answer, call_states, mark_executable, request_executable, ToolCallState,
+use crate::tool_call_state::{
+    add_error_answer, mark_executable, open_tool_call_states, request_executable, tool_meta_value,
+    ToolCallState,
 };
 
 pub const POST_HOOK_CALLED_KEY: &str = "goose.post_hook_called";
@@ -53,17 +54,11 @@ impl<S> Default for PostToolExecutionOperation<'_, S> {
     }
 }
 
-fn ran(request: &ToolRequest) -> bool {
-    request.tool_call.is_ok() && request_executable(request) != Some(false)
-}
-
-fn post_hook_called(request: &ToolRequest) -> bool {
-    request
-        .tool_meta
-        .as_ref()
-        .and_then(|meta| meta.get(POST_HOOK_CALLED_KEY))
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
+fn needs_post_hook(request: &ToolRequest) -> bool {
+    !request.was_executed_externally()
+        && request.tool_call.is_ok()
+        && request_executable(request) != Some(false)
+        && tool_meta_value(request, POST_HOOK_CALLED_KEY) != Some(true)
 }
 
 async fn call_post_hooks<S>(
@@ -79,7 +74,7 @@ async fn call_post_hooks<S>(
         .collect();
     let mut effects = Vec::new();
     for request in contents().filter_map(MessageContent::as_tool_request) {
-        if !ran(request) || post_hook_called(request) {
+        if !needs_post_hook(request) {
             continue;
         }
         let Some(response) = responses.get(request.id.as_str()) else {
@@ -93,6 +88,24 @@ async fn call_post_hooks<S>(
         });
     }
     Ok(effects)
+}
+
+fn answer_unhandled_calls(
+    calls: &[(ToolRequest, ToolCallState)],
+    emit: &Emitter,
+) -> Vec<ConversationEffect> {
+    let mut effects = Vec::new();
+    let mut answers = Message::user();
+    for (request, state) in calls {
+        if *state != ToolCallState::Waiting {
+            effects.push(mark_executable(&request.id, false));
+            add_error_answer(&mut answers, request, NOT_HANDLED_MESSAGE);
+        }
+    }
+    if !answers.content.is_empty() {
+        effects.push(ConversationEffect::AppendMessage(emit.message(answers)));
+    }
+    effects
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -120,25 +133,20 @@ where
             }
         }
 
-        let calls: Vec<_> = call_states(messages)
+        let calls: Vec<_> = open_tool_call_states(messages)
             .into_iter()
             .filter(|(request, _)| !request.was_executed_externally())
             .collect();
-        let mut effects = Vec::new();
-        let mut answers = Message::user();
-        for (request, state) in &calls {
-            if *state != ToolCallState::Waiting {
-                effects.push(mark_executable(&request.id, false));
-                add_error_answer(&mut answers, request, NOT_HANDLED_MESSAGE);
-            }
-        }
-        if !answers.content.is_empty() {
-            effects.push(ConversationEffect::AppendMessage(emit.message(answers)));
+        let effects = answer_unhandled_calls(&calls, emit);
+        if !effects.is_empty() {
             return applied(effects.into_iter().map(E::from));
         }
-        if calls.is_empty() {
-            return not_applicable();
+        if calls
+            .iter()
+            .any(|(_, state)| *state == ToolCallState::Waiting)
+        {
+            return yielded();
         }
-        yielded()
+        not_applicable()
     }
 }

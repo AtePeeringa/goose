@@ -19,7 +19,7 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, Emitter, Operation, OperationFuture,
     OperationResult,
 };
-use crate::pre_tool_execution::request_executable;
+use crate::tool_call_state::request_executable;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 
 fn empty_input_schema() -> Arc<JsonObject> {

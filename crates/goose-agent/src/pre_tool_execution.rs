@@ -1,22 +1,22 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use goose_provider_types::conversation::message::{
-    ActionRequiredData, Message, MessageContent, ToolRequest,
-};
+use goose_provider_types::conversation::message::{Message, MessageContent, ToolRequest};
 use goose_provider_types::conversation::Conversation;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 use goose_provider_types::permission::Permission;
-use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
+use rmcp::model::CallToolRequestParams;
 
 use crate::operation::{
     applied, messages_since_kickoff, not_applicable, ConversationEffect, Emitter, Operation,
     OperationResult,
 };
+use crate::tool_call_state::{
+    add_error_answer, mark_executable, open_tool_call_states, ToolCallState,
+};
+pub use crate::tool_call_state::{request_executable, EXECUTABLE_KEY};
 
-pub const EXECUTABLE_KEY: &str = "goose.executable";
 pub const DEFAULT_DECLINED_MESSAGE: &str = "The user declined to run this tool.";
 
 #[derive(Debug)]
@@ -46,14 +46,6 @@ pub trait PreToolCallHook<S>: MaybeSend + MaybeSync {
     }
 }
 
-pub fn request_executable(request: &ToolRequest) -> Option<bool> {
-    request
-        .tool_meta
-        .as_ref()
-        .and_then(|meta| meta.get(EXECUTABLE_KEY))
-        .and_then(|value| value.as_bool())
-}
-
 pub fn user_answer_message(tool_call_id: &str, permission: Permission) -> Message {
     Message::user()
         .with_visibility(false, false)
@@ -62,64 +54,6 @@ pub fn user_answer_message(tool_call_id: &str, permission: Permission) -> Messag
             permission,
         ))
         .with_generated_id_if_missing()
-}
-
-pub(crate) fn mark_executable(tool_call_id: &str, executable: bool) -> ConversationEffect {
-    ConversationEffect::PatchToolRequestMeta {
-        tool_call_id: tool_call_id.to_string(),
-        patch: serde_json::json!({ EXECUTABLE_KEY: executable }),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ToolCallState {
-    Unchecked,
-    Allowed,
-    Waiting,
-    UserAnswered(Permission),
-    Declined,
-}
-
-pub(crate) fn call_states(messages: &[Message]) -> Vec<(ToolRequest, ToolCallState)> {
-    let mut answered = HashSet::new();
-    let mut questions = HashSet::new();
-    let mut user_answers = HashMap::new();
-    let mut requests = Vec::new();
-    for content in messages.iter().flat_map(|message| &message.content) {
-        match content {
-            MessageContent::ToolRequest(request) => requests.push(request),
-            MessageContent::ToolResponse(response) => {
-                answered.insert(response.id.as_str());
-            }
-            MessageContent::ActionRequired(action) => match &action.data {
-                ActionRequiredData::ToolConfirmation { id, .. } => {
-                    questions.insert(id.as_str());
-                }
-                ActionRequiredData::ToolConfirmationResponse { id, permission } => {
-                    user_answers.insert(id.as_str(), permission);
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    requests
-        .into_iter()
-        .filter(|request| !answered.contains(request.id.as_str()))
-        .map(|request| {
-            let state = match request_executable(request) {
-                None => ToolCallState::Unchecked,
-                Some(true) => ToolCallState::Allowed,
-                Some(false) if !questions.contains(request.id.as_str()) => ToolCallState::Declined,
-                Some(false) => match user_answers.get(request.id.as_str()) {
-                    Some(permission) => ToolCallState::UserAnswered((*permission).clone()),
-                    None => ToolCallState::Waiting,
-                },
-            };
-            (request.clone(), state)
-        })
-        .collect()
 }
 
 pub struct PreToolExecutionOperation<'a, S> {
@@ -157,12 +91,26 @@ fn question(
         .with_generated_id_if_missing()
 }
 
-pub(crate) fn add_error_answer(answers: &mut Message, request: &ToolRequest, text: &str) {
-    answers.add_tool_response_with_metadata(
-        request.id.clone(),
-        Ok(CallToolResult::error(vec![ContentBlock::text(text)])),
-        request.metadata.as_ref(),
-    );
+fn apply_decision(
+    decision: PreToolCallDecision,
+    request: &ToolRequest,
+    call: &CallToolRequestParams,
+    effects: &mut Vec<ConversationEffect>,
+    answers: &mut Message,
+) {
+    match decision {
+        PreToolCallDecision::Allow => {
+            effects.push(mark_executable(&request.id, true));
+        }
+        PreToolCallDecision::Deny { reason } => {
+            effects.push(mark_executable(&request.id, false));
+            add_error_answer(answers, request, &reason);
+        }
+        PreToolCallDecision::Ask { prompt } => {
+            effects.push(mark_executable(&request.id, false));
+            effects.push(question(request, call, prompt).into());
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -184,7 +132,7 @@ where
     ) -> Result<OperationResult<E>> {
         let mut effects = Vec::new();
         let mut answers = Message::user();
-        for (request, state) in &call_states(messages_since_kickoff(conversation)?) {
+        for (request, state) in &open_tool_call_states(messages_since_kickoff(conversation)?) {
             if request.was_executed_externally() {
                 continue;
             }
@@ -193,23 +141,11 @@ where
             };
             match state {
                 ToolCallState::Unchecked => {
-                    match self
+                    let decision = self
                         .hook
                         .before_call(session, conversation, request)
-                        .await?
-                    {
-                        PreToolCallDecision::Allow => {
-                            effects.push(mark_executable(&request.id, true));
-                        }
-                        PreToolCallDecision::Deny { reason } => {
-                            effects.push(mark_executable(&request.id, false));
-                            add_error_answer(&mut answers, request, &reason);
-                        }
-                        PreToolCallDecision::Ask { prompt } => {
-                            effects.push(mark_executable(&request.id, false));
-                            effects.push(question(request, call, prompt).into());
-                        }
-                    }
+                        .await?;
+                    apply_decision(decision, request, call, &mut effects, &mut answers);
                 }
                 ToolCallState::UserAnswered(permission) => {
                     self.hook.on_answer(session, request, permission).await?;
@@ -219,7 +155,9 @@ where
                         add_error_answer(&mut answers, request, &self.declined_message);
                     }
                 }
-                ToolCallState::Allowed | ToolCallState::Waiting | ToolCallState::Declined => {}
+                ToolCallState::Allowed
+                | ToolCallState::Waiting
+                | ToolCallState::MarkedNotRunUnanswered => {}
             }
         }
 
