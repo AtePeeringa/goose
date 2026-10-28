@@ -1314,15 +1314,13 @@ async fn recipe_final_output_denied_by_permission_receives_declined_response() -
         "the declined call must get one DECLINED_RESPONSE"
     );
 
-    assert_eq!(
-        env.payloads("pre.log").len(),
-        1,
-        "PreToolUse runs before the permission check"
+    assert!(
+        env.payloads("pre.log").is_empty(),
+        "no PreToolUse on decline"
     );
-    assert_eq!(
-        env.payloads("result.log").len(),
-        1,
-        "PreToolUseResult runs before the permission check"
+    assert!(
+        env.payloads("result.log").is_empty(),
+        "no PreToolUseResult on decline"
     );
     assert!(
         env.payloads("post.log").is_empty(),

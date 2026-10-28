@@ -345,7 +345,7 @@ where
             .into_iter()
             .filter(|(request, state)| {
                 !request.was_executed_externally()
-                    && matches!(state, ToolCallState::Unchecked | ToolCallState::Allowed)
+                    && matches!(state, ToolCallState::Unchecked | ToolCallState::Executable)
             })
             .map(|(request, _)| request.clone())
             .collect::<Vec<_>>();

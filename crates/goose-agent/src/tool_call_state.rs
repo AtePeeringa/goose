@@ -9,15 +9,17 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use crate::operation::ConversationEffect;
 
 pub const EXECUTABLE_KEY: &str = "goose.executable";
+pub const APPROVED_KEY: &str = "goose.approved";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ToolCallState<'a> {
     Responded(&'a ToolResponse),
     Unchecked,
-    Allowed,
-    Denied,
-    AwaitingConfirmation,
-    Confirmed(&'a Permission),
+    Approved,
+    Executable,
+    Blocked,
+    AwaitingUser,
+    UserAnswered(&'a Permission),
 }
 
 impl ToolCallState<'_> {
@@ -61,12 +63,17 @@ pub(crate) fn tool_calls(messages: &[Message]) -> Vec<(&ToolRequest, ToolCallSta
             let id = request.id.as_str();
             let state = match (tool_responses_by_id.get(id), request_executable(request)) {
                 (Some(response), _) => ToolCallState::Responded(response),
+                (None, Some(true)) => ToolCallState::Executable,
+                (None, _) if tool_meta_flag(request, APPROVED_KEY) == Some(true) => {
+                    ToolCallState::Approved
+                }
                 (None, None) => ToolCallState::Unchecked,
-                (None, Some(true)) => ToolCallState::Allowed,
-                (None, Some(false)) if !confirmation_requests.contains(id) => ToolCallState::Denied,
+                (None, Some(false)) if !confirmation_requests.contains(id) => {
+                    ToolCallState::Blocked
+                }
                 (None, Some(false)) => match confirmations.get(id) {
-                    Some(permission) => ToolCallState::Confirmed(permission),
-                    None => ToolCallState::AwaitingConfirmation,
+                    Some(permission) => ToolCallState::UserAnswered(permission),
+                    None => ToolCallState::AwaitingUser,
                 },
             };
             (request, state)
@@ -74,18 +81,29 @@ pub(crate) fn tool_calls(messages: &[Message]) -> Vec<(&ToolRequest, ToolCallSta
         .collect()
 }
 
-pub fn request_executable(request: &ToolRequest) -> Option<bool> {
+fn tool_meta_flag(request: &ToolRequest, key: &str) -> Option<bool> {
     request
         .tool_meta
         .as_ref()
-        .and_then(|meta| meta.get(EXECUTABLE_KEY))
+        .and_then(|meta| meta.get(key))
         .and_then(serde_json::Value::as_bool)
+}
+
+pub fn request_executable(request: &ToolRequest) -> Option<bool> {
+    tool_meta_flag(request, EXECUTABLE_KEY)
 }
 
 pub(crate) fn mark_executable(tool_call_id: &str, executable: bool) -> ConversationEffect {
     ConversationEffect::PatchToolRequestMeta {
         tool_call_id: tool_call_id.to_string(),
         patch: serde_json::json!({ EXECUTABLE_KEY: executable }),
+    }
+}
+
+pub(crate) fn mark_approved(tool_call_id: &str) -> ConversationEffect {
+    ConversationEffect::PatchToolRequestMeta {
+        tool_call_id: tool_call_id.to_string(),
+        patch: serde_json::json!({ APPROVED_KEY: true, EXECUTABLE_KEY: false }),
     }
 }
 

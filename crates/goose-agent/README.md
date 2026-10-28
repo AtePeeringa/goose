@@ -73,42 +73,64 @@ Good to know:
   `with_deny_limit_per_turn`. To tell the user why the model stopped at the
   limit, set a message with `with_deny_limit_message`; it is shown and saved.
 
-A pre-tool hook looks at each tool call before it runs. It can let the call
-run, block it, or ask the user first. Tool approval is a pre-tool hook that
-asks.
+Two operations decide whether each tool call may run. Register both, in this
+order, before every step that runs tools:
 
-To add one, implement `PreToolCallHook<S>` and give it to
-`PreToolExecutionOperation`. Its `before_call` returns one of:
+```rust
+ToolApprovalOperation::new(approval)
+PreToolCallHookOperation::new().with_hook(hook)
+```
 
-- `Allow` — the call runs.
+`ToolApprovalOperation` decides whether a call may run and can ask the user
+first. Implement `ToolApproval<S>`. Its `check` gets every new call from the
+model's reply at once, so it can check them together, and returns one decision
+per call, in the same order. Each decision is one of:
+
+- `Allow` — the call is approved and goes on to the pre-tool hook.
 - `Deny` — the call doesn't run. The model gets `reason` as the call's error
   result.
 - `Ask` — the user is asked to confirm first. The confirmation request shows
   the tool and its arguments, plus `prompt` if you set one.
+- An error — the run ends with that error. The run also ends with an error if
+  `check` returns a different number of decisions than calls.
+
+When the user chooses, `on_confirmation` gets the choice once, so approval can
+remember "always allow" or "always deny". If the user declines, the call gets
+the declined message as its error result; change that text with
+`with_declined_message`. If the user allows, the call is approved. To approve
+every call, give it an approval whose `check` always returns `Allow`.
+
+`PreToolCallHookOperation` runs the pre-tool hook on approved calls. It never
+runs for a call that is denied or declined, so it is the place for checks with
+side effects, such as running user scripts. Implement `PreToolCallHook<S>`. Its
+`before_call` returns one of:
+
+- `Allow` — the call runs.
+- `Deny` — the call doesn't run. The model gets `reason` as its error result.
 - An error — the run ends with that error.
 
-When the user chooses, the hook's `on_confirmation` gets the choice once, so it
-can remember "always allow" or "always deny". If the user allows the call, it runs;
-otherwise it gets the declined message as its error result. Change that text
-with `with_declined_message`.
+It handles one call per pass, so each result is saved before the next hook
+runs. Without a hook, it lets every approved call run.
 
 Good to know:
 
-- Put `PreToolExecutionOperation` before every step that runs tools, and
-  `UnhandledToolCallsOperation` after them. Allowed calls run while others wait
-  for the user.
+- Register both operations. Without `PreToolCallHookOperation`, approved calls
+  never run; without `ToolApprovalOperation`, calls run without approval or the
+  hook.
+- Put `UnhandledToolCallsOperation` after every step that runs tools. Allowed
+  calls run while others wait for the user.
 - Show the confirmation request to the user only after it is saved, so the
   user can't choose before it exists. The operation saves it but doesn't send it.
 - When the user chooses, save `confirmation_response_message(call_id,
   permission)`. It is hidden, so it isn't mistaken for a new user message.
-- Calls with arguments that can't be read skip the hook; the tool step responds
-  to them with the error.
+- Calls with arguments that can't be read skip approval and the hook; the tool
+  step responds to them with the error.
 - If you write your own step that runs tools, run only calls that have no
   response yet and where `request_executable(request)` isn't `Some(false)`.
-  `Some(false)` means the user was asked and hasn't allowed the call: it is
-  still waiting, or the user declined it and it already has its error result.
+  `Some(false)` means the call isn't ready: it waits for the user or the
+  pre-tool hook, or it was declined and already has its error result.
   `ToolOperation` already does this.
-- `PreToolExecutionOperation` takes one hook. To run several, write one hook
+- Each operation takes one approval or one hook. To run several, write one
   that calls the others.
 
 A post-tool hook sees each tool call's result right after the call. It can't
@@ -120,10 +142,10 @@ the result is still saved. If you write your own step that runs tools, call
 `after_call` after each call yourself and decide what an error means; otherwise
 its calls get no post-tool hook.
 
-`UnhandledToolCallsOperation` is needed with `PreToolExecutionOperation`. Put it
-after every step that runs tools, right before inference. It gives calls no step handled a "not handled" error result, and it
-pauses the run while calls wait for the user, so the model isn't called with
-calls still open. A step that runs tools after it gets "not handled" for its
+`UnhandledToolCallsOperation` is needed with `ToolApprovalOperation`. Put it
+after every step that runs tools, right before inference. It gives calls no
+step handled a "not handled" error result, and it pauses the run while calls
+wait for the user, so the model isn't called with calls still open. A step that runs tools after it gets "not handled" for its
 calls.
 
 ## Reading the conversation

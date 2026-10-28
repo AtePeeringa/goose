@@ -11,11 +11,11 @@ use crate::agents::state_machine::{
     deny_limit_warning, BangShellOperation, CompactionOperation, DoctorOperation,
     EmptyResponseOperation, ExitOnErrorOperation, GooseEffect, GooseInferenceProvider,
     GooseInferenceRequestPreparer, GoosePostToolHook, GoosePreToolHook, GooseStopHook,
-    InferenceRunner, MaxTurnsOperation, Operation, PreToolExecutionOperation, ProjectOperation,
-    RecipeOperation, RemainingToolCallsOperation, RetryOperation, SkillOperation,
+    GooseToolApproval, InferenceRunner, MaxTurnsOperation, Operation, PreToolCallHookOperation,
+    ProjectOperation, RecipeOperation, RemainingToolCallsOperation, RetryOperation, SkillOperation,
     SlashCommandOperation, StateMachine, StatusOperation, SteerOperation, SteerQueue, Step,
-    StopHookOperation, SubagentOperation, ToolExecutionOperation, ToolPairCompactionOperation,
-    UnhandledToolCallsOperation,
+    StopHookOperation, SubagentOperation, ToolApprovalOperation, ToolExecutionOperation,
+    ToolPairCompactionOperation, UnhandledToolCallsOperation,
 };
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::agents::tool_execution::DECLINED_RESPONSE;
@@ -77,12 +77,14 @@ pub(crate) fn build_state_machine(
         Arc::new(GoosePostToolHook::new(hook_manager.clone()));
     let mut operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
         Arc::new(
-            PreToolExecutionOperation::new(Arc::new(GoosePreToolHook::new(
+            ToolApprovalOperation::new(Arc::new(GooseToolApproval::new(tool_inspection_manager)))
+                .with_declined_message(DECLINED_RESPONSE),
+        ),
+        Arc::new(
+            PreToolCallHookOperation::new().with_hook(Arc::new(GoosePreToolHook::new(
                 hook_manager.clone(),
-                tool_inspection_manager,
                 Arc::clone(&extension_lease),
-            )))
-            .with_declined_message(DECLINED_RESPONSE),
+            ))),
         ),
         Arc::new(SkillOperation::new(
             Arc::clone(&extension_lease),

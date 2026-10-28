@@ -32,7 +32,7 @@ fn respond_to_unhandled_calls(
 ) -> Option<Message> {
     let mut tool_responses = Message::user();
     for (request, state) in calls {
-        if *state != ToolCallState::AwaitingConfirmation {
+        if *state != ToolCallState::AwaitingUser {
             tracing::error!(tool_call_id = %request.id, "tool call was not handled by any operation");
             add_error_response(&mut tool_responses, request, NOT_HANDLED_MESSAGE);
         }
@@ -66,7 +66,7 @@ where
         }
         if open_calls
             .iter()
-            .any(|(_, state)| *state == ToolCallState::AwaitingConfirmation)
+            .any(|(_, state)| *state == ToolCallState::AwaitingUser)
         {
             return yielded();
         }

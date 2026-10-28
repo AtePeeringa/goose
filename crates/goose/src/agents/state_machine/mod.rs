@@ -32,6 +32,7 @@ mod session;
 mod stop_hook;
 pub(crate) use session::run as run_goose;
 pub(crate) use session::session_start_message;
+mod tool_approval;
 mod tool_confirmation;
 mod usage;
 
@@ -48,9 +49,10 @@ pub use goose_agent::operation::{
     InferenceInput, MachineEffect, Operation, OperationResult, RunStatus, SlashCommand, StepResult,
     CLIENT_LOG,
 };
-pub(super) use goose_agent::pre_tool_execution::PreToolExecutionOperation;
+pub(super) use goose_agent::pre_tool_call_hook::PreToolCallHookOperation;
 pub(super) use goose_agent::stop_hook::StopHookOperation;
 pub(super) use goose_agent::subagent::SubagentOperation;
+pub(super) use goose_agent::tool_approval::ToolApprovalOperation;
 pub(super) use goose_agent::unhandled_tool_calls::UnhandledToolCallsOperation;
 pub(crate) use tool_confirmation::{
     has_unapplied_tool_confirmation_response, pending_tool_confirmations,
@@ -81,3 +83,4 @@ pub(super) use ops_toolcalling::ToolExecutionOperation;
 pub(super) use post_tool_hook::GoosePostToolHook;
 pub(super) use pre_tool_hook::GoosePreToolHook;
 pub(super) use stop_hook::{deny_limit_warning, GooseStopHook};
+pub(super) use tool_approval::GooseToolApproval;

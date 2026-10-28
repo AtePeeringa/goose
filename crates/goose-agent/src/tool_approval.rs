@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use async_trait::async_trait;
 use goose_provider_types::conversation::message::{Message, MessageContent, ToolRequest};
 use goose_provider_types::conversation::Conversation;
@@ -12,13 +12,14 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, ConversationEffect, Emitter, Operation,
     OperationResult,
 };
-use crate::tool_call_state::{add_error_response, mark_executable, tool_calls, ToolCallState};
-pub use crate::tool_call_state::{request_executable, EXECUTABLE_KEY};
+use crate::tool_call_state::{
+    add_error_response, mark_approved, mark_executable, tool_calls, ToolCallState,
+};
 
 pub const DEFAULT_DECLINED_MESSAGE: &str = "The user declined to run this tool.";
 
 #[derive(Debug)]
-pub enum PreToolCallDecision {
+pub enum ApprovalDecision {
     Allow,
     Deny { reason: String },
     Ask { prompt: Option<String> },
@@ -26,13 +27,13 @@ pub enum PreToolCallDecision {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait PreToolCallHook<S>: MaybeSend + MaybeSync {
-    async fn before_call(
+pub trait ToolApproval<S>: MaybeSend + MaybeSync {
+    async fn check(
         &self,
         session: &S,
         conversation: &Conversation,
-        request: &ToolRequest,
-    ) -> Result<PreToolCallDecision>;
+        requests: &[&ToolRequest],
+    ) -> Result<Vec<ApprovalDecision>>;
 
     async fn on_confirmation(
         &self,
@@ -54,15 +55,15 @@ pub fn confirmation_response_message(tool_call_id: &str, permission: Permission)
         .with_generated_id_if_missing()
 }
 
-pub struct PreToolExecutionOperation<'a, S> {
-    hook: Arc<dyn PreToolCallHook<S> + 'a>,
+pub struct ToolApprovalOperation<'a, S> {
+    approval: Arc<dyn ToolApproval<S> + 'a>,
     declined_message: String,
 }
 
-impl<'a, S> PreToolExecutionOperation<'a, S> {
-    pub fn new(hook: Arc<dyn PreToolCallHook<S> + 'a>) -> Self {
+impl<'a, S> ToolApprovalOperation<'a, S> {
+    pub fn new(approval: Arc<dyn ToolApproval<S> + 'a>) -> Self {
         Self {
-            hook,
+            approval,
             declined_message: DEFAULT_DECLINED_MESSAGE.to_string(),
         }
     }
@@ -89,36 +90,15 @@ fn confirmation_request(
         .with_generated_id_if_missing()
 }
 
-fn apply_decision(
-    decision: PreToolCallDecision,
-    request: &ToolRequest,
-    call: &CallToolRequestParams,
-    effects: &mut Vec<ConversationEffect>,
-    tool_responses: &mut Message,
-) {
-    match decision {
-        PreToolCallDecision::Allow => {
-            effects.push(mark_executable(&request.id, true));
-        }
-        PreToolCallDecision::Deny { reason } => {
-            add_error_response(tool_responses, request, &reason);
-        }
-        PreToolCallDecision::Ask { prompt } => {
-            effects.push(mark_executable(&request.id, false));
-            effects.push(confirmation_request(request, call, prompt).into());
-        }
-    }
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S, E> Operation<S, E> for PreToolExecutionOperation<'_, S>
+impl<S, E> Operation<S, E> for ToolApprovalOperation<'_, S>
 where
     S: MaybeSend + MaybeSync + 'static,
     E: From<ConversationEffect> + MaybeSend + 'static,
 {
     fn name(&self) -> &'static str {
-        "pre_tool_execution"
+        "tool_approval"
     }
 
     async fn run(
@@ -129,6 +109,7 @@ where
     ) -> Result<OperationResult<E>> {
         let mut effects = Vec::new();
         let mut tool_responses = Message::user();
+        let mut unchecked = Vec::new();
         for (request, state) in tool_calls(messages_since_kickoff(conversation)?) {
             if request.was_executed_externally() {
                 continue;
@@ -137,27 +118,48 @@ where
                 continue;
             };
             match state {
-                ToolCallState::Unchecked => {
-                    let decision = self
-                        .hook
-                        .before_call(session, conversation, request)
-                        .await?;
-                    apply_decision(decision, request, call, &mut effects, &mut tool_responses);
-                }
-                ToolCallState::Confirmed(permission) => {
-                    self.hook
+                ToolCallState::Unchecked => unchecked.push((request, call)),
+                ToolCallState::UserAnswered(permission) => {
+                    self.approval
                         .on_confirmation(session, request, permission)
                         .await?;
                     if matches!(permission, Permission::AllowOnce | Permission::AlwaysAllow) {
-                        effects.push(mark_executable(&request.id, true));
+                        effects.push(mark_approved(&request.id));
                     } else {
                         add_error_response(&mut tool_responses, request, &self.declined_message);
                     }
                 }
                 ToolCallState::Responded(_)
-                | ToolCallState::Allowed
-                | ToolCallState::AwaitingConfirmation
-                | ToolCallState::Denied => {}
+                | ToolCallState::Approved
+                | ToolCallState::Executable
+                | ToolCallState::AwaitingUser
+                | ToolCallState::Blocked => {}
+            }
+        }
+
+        if !unchecked.is_empty() {
+            let requests: Vec<_> = unchecked.iter().map(|(request, _)| *request).collect();
+            let decisions = self
+                .approval
+                .check(session, conversation, &requests)
+                .await?;
+            ensure!(
+                decisions.len() == unchecked.len(),
+                "tool approval returned {} decisions for {} tool calls",
+                decisions.len(),
+                unchecked.len()
+            );
+            for ((request, call), decision) in unchecked.into_iter().zip(decisions) {
+                match decision {
+                    ApprovalDecision::Allow => effects.push(mark_approved(&request.id)),
+                    ApprovalDecision::Deny { reason } => {
+                        add_error_response(&mut tool_responses, request, &reason)
+                    }
+                    ApprovalDecision::Ask { prompt } => {
+                        effects.push(mark_executable(&request.id, false));
+                        effects.push(confirmation_request(request, call, prompt).into());
+                    }
+                }
             }
         }
 

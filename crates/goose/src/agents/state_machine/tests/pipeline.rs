@@ -1166,8 +1166,9 @@ impl TestRun {
     }
 }
 
-const TOOL_OPERATIONS: [&str; 6] = [
-    "pre_tool_execution",
+const TOOL_OPERATIONS: [&str; 7] = [
+    "tool_approval",
+    "pre_tool_call_hook",
     "skills",
     "recipe",
     "tool_execution",

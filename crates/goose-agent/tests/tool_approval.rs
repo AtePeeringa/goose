@@ -5,10 +5,11 @@ use async_trait::async_trait;
 use goose_agent::{
     events::AgentEvent,
     operation::{ConversationEffect, Emitter, Operation, OperationResult, RunStatus},
-    pre_tool_execution::{
-        confirmation_response_message, PreToolCallDecision, PreToolCallHook,
-        PreToolExecutionOperation, DEFAULT_DECLINED_MESSAGE, EXECUTABLE_KEY,
+    tool_approval::{
+        confirmation_response_message, ApprovalDecision, ToolApproval, ToolApprovalOperation,
+        DEFAULT_DECLINED_MESSAGE,
     },
+    tool_call_state::{APPROVED_KEY, EXECUTABLE_KEY},
 };
 use goose_provider_types::conversation::{
     message::{
@@ -31,13 +32,13 @@ enum Reply {
 }
 
 #[derive(Default)]
-struct FakeHook {
+struct FakeApproval {
     replies: Vec<(&'static str, Reply)>,
-    checked: Mutex<Vec<String>>,
+    checked: Mutex<Vec<Vec<String>>>,
     told: Mutex<Vec<(String, Permission)>>,
 }
 
-impl FakeHook {
+impl FakeApproval {
     fn new(replies: &[(&'static str, Reply)]) -> Arc<Self> {
         Arc::new(Self {
             replies: replies.to_vec(),
@@ -45,7 +46,7 @@ impl FakeHook {
         })
     }
 
-    fn checked(&self) -> Vec<String> {
+    fn checked(&self) -> Vec<Vec<String>> {
         self.checked.lock().unwrap().clone()
     }
 
@@ -55,29 +56,37 @@ impl FakeHook {
 }
 
 #[async_trait]
-impl PreToolCallHook<()> for FakeHook {
-    async fn before_call(
+impl ToolApproval<()> for FakeApproval {
+    async fn check(
         &self,
         _session: &(),
         _conversation: &Conversation,
-        request: &ToolRequest,
-    ) -> Result<PreToolCallDecision> {
-        self.checked.lock().unwrap().push(request.id.clone());
-        let reply = self
-            .replies
+        requests: &[&ToolRequest],
+    ) -> Result<Vec<ApprovalDecision>> {
+        self.checked
+            .lock()
+            .unwrap()
+            .push(requests.iter().map(|request| request.id.clone()).collect());
+        requests
             .iter()
-            .find(|(id, _)| *id == request.id)
-            .map_or(Reply::Allow, |(_, reply)| *reply);
-        match reply {
-            Reply::Allow => Ok(PreToolCallDecision::Allow),
-            Reply::Deny(reason) => Ok(PreToolCallDecision::Deny {
-                reason: reason.to_string(),
-            }),
-            Reply::Ask(prompt) => Ok(PreToolCallDecision::Ask {
-                prompt: prompt.map(str::to_string),
-            }),
-            Reply::Fail => anyhow::bail!("hook crashed"),
-        }
+            .map(|request| {
+                let reply = self
+                    .replies
+                    .iter()
+                    .find(|(id, _)| *id == request.id)
+                    .map_or(Reply::Allow, |(_, reply)| *reply);
+                match reply {
+                    Reply::Allow => Ok(ApprovalDecision::Allow),
+                    Reply::Deny(reason) => Ok(ApprovalDecision::Deny {
+                        reason: reason.to_string(),
+                    }),
+                    Reply::Ask(prompt) => Ok(ApprovalDecision::Ask {
+                        prompt: prompt.map(str::to_string),
+                    }),
+                    Reply::Fail => anyhow::bail!("approval crashed"),
+                }
+            })
+            .collect()
     }
 
     async fn on_confirmation(
@@ -96,7 +105,7 @@ impl PreToolCallHook<()> for FakeHook {
 
 struct Outcome {
     status: Option<RunStatus>,
-    marks: Vec<(String, bool)>,
+    marks: Vec<(String, serde_json::Value)>,
     appended: Vec<Message>,
     shown: Vec<Message>,
 }
@@ -118,10 +127,7 @@ impl Outcome {
     }
 }
 
-async fn run(
-    operation: &PreToolExecutionOperation<'_, ()>,
-    messages: Vec<Message>,
-) -> Result<Outcome> {
+async fn run(operation: &ToolApprovalOperation<'_, ()>, messages: Vec<Message>) -> Result<Outcome> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let emit = Emitter::new(tx, CancellationToken::new());
     let conversation = Conversation::new_unvalidated(messages);
@@ -147,9 +153,7 @@ async fn run(
                 ConversationEffect::PatchToolRequestMeta {
                     tool_call_id,
                     patch,
-                } => outcome
-                    .marks
-                    .push((tool_call_id, patch[EXECUTABLE_KEY].as_bool().unwrap())),
+                } => outcome.marks.push((tool_call_id, patch)),
                 _ => panic!("unexpected effect"),
             }
         }
@@ -224,23 +228,46 @@ fn tool_response(id: &str) -> Message {
     )
 }
 
-#[tokio::test]
-async fn allow_marks_the_call_true() -> Result<()> {
-    let hook = FakeHook::new(&[("a", Reply::Allow)]);
-    let operation = PreToolExecutionOperation::new(hook.clone());
+fn approved(id: &str) -> (String, serde_json::Value) {
+    (
+        id.to_string(),
+        json!({ APPROVED_KEY: true, EXECUTABLE_KEY: false }),
+    )
+}
 
-    let outcome = run(&operation, vec![kickoff(), calls(&["a"])]).await?;
+fn waiting(id: &str) -> (String, serde_json::Value) {
+    (id.to_string(), json!({ EXECUTABLE_KEY: false }))
+}
+
+fn approved_call(id: &str) -> Message {
+    Message::assistant().with_tool_request_with_metadata(
+        id,
+        Ok(CallToolRequestParams::new(id.to_string())),
+        None,
+        Some(json!({ APPROVED_KEY: true, EXECUTABLE_KEY: false })),
+    )
+}
+
+#[tokio::test]
+async fn allow_marks_the_call_approved_but_not_ready_to_run() -> Result<()> {
+    let approval = FakeApproval::new(&[]);
+
+    let outcome = run(
+        &ToolApprovalOperation::new(approval.clone()),
+        vec![kickoff(), calls(&["a"])],
+    )
+    .await?;
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
-    assert_eq!(outcome.marks, vec![("a".to_string(), true)]);
+    assert_eq!(outcome.marks, vec![approved("a")]);
     assert!(outcome.appended.is_empty());
-    assert_eq!(hook.checked(), vec!["a"]);
+    assert_eq!(approval.checked(), vec![vec!["a"]]);
     Ok(())
 }
 
 #[tokio::test]
 async fn deny_streams_an_error_response_with_the_reason_and_leaves_no_mark() -> Result<()> {
-    let operation = PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Deny("no"))]));
+    let operation = ToolApprovalOperation::new(FakeApproval::new(&[("a", Reply::Deny("no"))]));
 
     let outcome = run(&operation, vec![kickoff(), calls(&["a"])]).await?;
 
@@ -254,11 +281,11 @@ async fn deny_streams_an_error_response_with_the_reason_and_leaves_no_mark() -> 
 #[tokio::test]
 async fn ask_marks_false_and_saves_a_confirmation_request_without_streaming_it() -> Result<()> {
     let operation =
-        PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Ask(Some("careful")))]));
+        ToolApprovalOperation::new(FakeApproval::new(&[("a", Reply::Ask(Some("careful")))]));
 
     let outcome = run(&operation, vec![kickoff(), calls(&["a"])]).await?;
 
-    assert_eq!(outcome.marks, vec![("a".to_string(), false)]);
+    assert_eq!(outcome.marks, vec![waiting("a")]);
     let confirmation_requests = outcome.confirmation_requests();
     assert_eq!(confirmation_requests.len(), 1);
     assert_eq!(
@@ -278,54 +305,55 @@ async fn ask_marks_false_and_saves_a_confirmation_request_without_streaming_it()
 }
 
 #[tokio::test]
-async fn handles_a_mixed_batch_in_one_pass() -> Result<()> {
-    let hook = FakeHook::new(&[
+async fn checks_a_mixed_batch_in_one_call() -> Result<()> {
+    let approval = FakeApproval::new(&[
         ("a", Reply::Allow),
         ("b", Reply::Deny("no")),
         ("c", Reply::Ask(None)),
     ]);
-    let operation = PreToolExecutionOperation::new(hook.clone());
 
-    let outcome = run(&operation, vec![kickoff(), calls(&["a", "b", "c"])]).await?;
+    let outcome = run(
+        &ToolApprovalOperation::new(approval.clone()),
+        vec![kickoff(), calls(&["a", "b", "c"])],
+    )
+    .await?;
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
-    assert_eq!(
-        outcome.marks,
-        vec![("a".to_string(), true), ("c".to_string(), false),]
-    );
+    assert_eq!(outcome.marks, vec![approved("a"), waiting("c")]);
     assert_eq!(
         outcome.responses(),
         vec![("b".to_string(), "no".to_string())]
     );
     assert_eq!(outcome.confirmation_requests().len(), 1);
-    assert_eq!(hook.checked(), vec!["a", "b", "c"]);
+    assert_eq!(approval.checked(), vec![vec!["a", "b", "c"]]);
     Ok(())
 }
 
 #[tokio::test]
-async fn never_pauses_while_a_call_is_waiting() -> Result<()> {
-    let hook = FakeHook::new(&[]);
-    let operation = PreToolExecutionOperation::new(hook.clone());
+async fn leaves_waiting_approved_and_ready_calls_alone() -> Result<()> {
+    let approval = FakeApproval::new(&[]);
 
     let outcome = run(
-        &operation,
+        &ToolApprovalOperation::new(approval.clone()),
         vec![
             kickoff(),
-            marked_call("c", false),
-            confirmation_request("c"),
+            marked_call("waiting", false),
+            confirmation_request("waiting"),
+            approved_call("approved"),
+            marked_call("ready", true),
         ],
     )
     .await?;
 
     assert!(outcome.status.is_none());
-    assert!(hook.checked().is_empty());
+    assert!(approval.checked().is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() -> Result<()> {
-    let hook = FakeHook::new(&[]);
-    let operation = PreToolExecutionOperation::new(hook.clone());
+async fn a_user_allow_tells_the_approval_once_and_marks_the_call_approved() -> Result<()> {
+    let approval = FakeApproval::new(&[]);
+    let operation = ToolApprovalOperation::new(approval.clone());
     let choice = click("c", Permission::AlwaysAllow);
     assert!(!choice.is_user_visible());
     assert!(!choice.is_agent_visible());
@@ -342,18 +370,18 @@ async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() -> Result<()
     )
     .await?;
 
-    assert_eq!(outcome.marks, vec![("c".to_string(), true)]);
+    assert_eq!(outcome.marks, vec![approved("c")]);
     assert_eq!(
-        hook.told(),
+        approval.told(),
         vec![("c".to_string(), Permission::AlwaysAllow)]
     );
-    assert!(hook.checked().is_empty());
+    assert!(approval.checked().is_empty());
 
     let outcome = run(
         &operation,
         vec![
             kickoff(),
-            marked_call("c", true),
+            approved_call("c"),
             confirmation_request("c"),
             click("c", Permission::AlwaysAllow),
         ],
@@ -361,7 +389,7 @@ async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() -> Result<()
     .await?;
 
     assert!(outcome.status.is_none());
-    assert_eq!(hook.told().len(), 1);
+    assert_eq!(approval.told().len(), 1);
     Ok(())
 }
 
@@ -376,9 +404,9 @@ async fn a_user_deny_responds_with_the_declined_message() -> Result<()> {
         ]
     };
 
-    let hook = FakeHook::new(&[]);
+    let approval = FakeApproval::new(&[]);
     let outcome = run(
-        &PreToolExecutionOperation::new(hook.clone()),
+        &ToolApprovalOperation::new(approval.clone()),
         conversation(),
     )
     .await?;
@@ -387,9 +415,12 @@ async fn a_user_deny_responds_with_the_declined_message() -> Result<()> {
         outcome.responses(),
         vec![("c".to_string(), DEFAULT_DECLINED_MESSAGE.to_string())]
     );
-    assert_eq!(hook.told(), vec![("c".to_string(), Permission::DenyOnce)]);
+    assert_eq!(
+        approval.told(),
+        vec![("c".to_string(), Permission::DenyOnce)]
+    );
 
-    let custom = PreToolExecutionOperation::new(FakeHook::new(&[])).with_declined_message("nope");
+    let custom = ToolApprovalOperation::new(FakeApproval::new(&[])).with_declined_message("nope");
     let outcome = run(&custom, conversation()).await?;
     assert_eq!(
         outcome.responses(),
@@ -400,11 +431,10 @@ async fn a_user_deny_responds_with_the_declined_message() -> Result<()> {
 
 #[tokio::test]
 async fn skips_unreadable_external_and_responded_calls() -> Result<()> {
-    let hook = FakeHook::new(&[]);
-    let operation = PreToolExecutionOperation::new(hook.clone());
+    let approval = FakeApproval::new(&[]);
 
     let outcome = run(
-        &operation,
+        &ToolApprovalOperation::new(approval.clone()),
         vec![
             kickoff(),
             Message::assistant()
@@ -425,18 +455,47 @@ async fn skips_unreadable_external_and_responded_calls() -> Result<()> {
     .await?;
 
     assert!(outcome.status.is_none());
-    assert!(hook.checked().is_empty());
+    assert!(approval.checked().is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_hook_error_ends_the_run() {
-    let operation = PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Fail)]));
+async fn an_approval_error_ends_the_run() {
+    let operation = ToolApprovalOperation::new(FakeApproval::new(&[("a", Reply::Fail)]));
 
     let error = run(&operation, vec![kickoff(), calls(&["a"])])
         .await
         .err()
         .unwrap();
 
-    assert_eq!(error.to_string(), "hook crashed");
+    assert_eq!(error.to_string(), "approval crashed");
+}
+
+struct TooFewDecisions;
+
+#[async_trait]
+impl ToolApproval<()> for TooFewDecisions {
+    async fn check(
+        &self,
+        _session: &(),
+        _conversation: &Conversation,
+        _requests: &[&ToolRequest],
+    ) -> Result<Vec<ApprovalDecision>> {
+        Ok(vec![ApprovalDecision::Allow])
+    }
+}
+
+#[tokio::test]
+async fn a_decision_count_that_does_not_match_the_calls_ends_the_run() {
+    let operation = ToolApprovalOperation::new(Arc::new(TooFewDecisions));
+
+    let error = run(&operation, vec![kickoff(), calls(&["a", "b"])])
+        .await
+        .err()
+        .unwrap();
+
+    assert_eq!(
+        error.to_string(),
+        "tool approval returned 1 decisions for 2 tool calls"
+    );
 }

@@ -188,7 +188,7 @@ mod tests {
     use super::*;
     use crate::conversation::message::ToolRequest;
     use crate::recipe::{Recipe, Response};
-    use goose_agent::pre_tool_execution::EXECUTABLE_KEY;
+    use goose_agent::tool_call_state::EXECUTABLE_KEY;
     use rmcp::model::CallToolRequestParams;
     use std::sync::Mutex;
     use tokio::sync::mpsc;

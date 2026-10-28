@@ -15,8 +15,8 @@ use goose_agent::{
         RunStatus,
     },
     post_tool_call_hook::PostToolCallHook,
-    pre_tool_execution::EXECUTABLE_KEY,
     tool::{ToolOperation, ToolProvider},
+    tool_call_state::EXECUTABLE_KEY,
 };
 use goose_provider_types::conversation::{
     message::{Message, MessageContent, ToolRequest, ToolResponse},

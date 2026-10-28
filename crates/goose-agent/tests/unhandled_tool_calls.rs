@@ -1,6 +1,6 @@
 use goose_agent::{
     operation::{ConversationEffect, Emitter, Operation, OperationResult, RunStatus},
-    pre_tool_execution::EXECUTABLE_KEY,
+    tool_call_state::EXECUTABLE_KEY,
     unhandled_tool_calls::UnhandledToolCallsOperation,
 };
 use goose_provider_types::conversation::{

@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
 use goose_agent::post_tool_call_hook::PostToolCallHook;
-use goose_agent::pre_tool_execution::request_executable;
+use goose_agent::tool_call_state::request_executable;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, Role, Tool};
 
 use crate::agents::extension_manager::{CallRequest, ExtensionLease, ExtensionManager};
@@ -558,6 +558,15 @@ pub(super) fn pending_advertised_tool_requests(
         .into_iter()
         .filter(|(request, _)| request_was_advertised(messages, request))
         .collect()
+}
+
+pub(super) fn call_will_not_run(
+    session: &Session,
+    conversation: &Conversation,
+    request: &ToolRequest,
+) -> Result<bool> {
+    Ok(session.goose_mode == GooseMode::Chat
+        || !request_was_advertised(messages_since_kickoff(conversation)?, request))
 }
 
 pub(super) fn request_was_advertised(messages: &[Message], request: &ToolRequest) -> bool {
