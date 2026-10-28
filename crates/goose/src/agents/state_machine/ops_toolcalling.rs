@@ -1,6 +1,7 @@
 //! Exposes extension capabilities and executes requests that belong to them.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -92,7 +93,8 @@ pub(super) fn tool_span(tool_name: &str, tool_call_id: &str, session_id: &str) -
 pub(super) async fn emit_with_matcher(
     hook_manager: &HookManager,
     event: HookEvent,
-    session: &Session,
+    session_id: &str,
+    working_dir: &Path,
     matcher: String,
     tool_name: &str,
     tool_input: Option<serde_json::Value>,
@@ -100,9 +102,9 @@ pub(super) async fn emit_with_matcher(
     if !hook_manager.has_hooks(event) {
         return;
     }
-    let mut context = HookContext::new(event, &session.id)
+    let mut context = HookContext::new(event, session_id)
         .with_tool(tool_name.to_string(), tool_input)
-        .with_working_dir(session.working_dir.to_string_lossy().to_string());
+        .with_working_dir(working_dir.to_string_lossy().to_string());
     context.matcher_context = Some(matcher);
     hook_manager.emit(event, context).await;
 }
@@ -128,7 +130,8 @@ pub(super) async fn emit_extended_pre_hooks(
         emit_with_matcher(
             hook_manager,
             event,
-            session,
+            &session.id,
+            &session.working_dir,
             matcher,
             tool_name,
             tool_input.cloned(),
@@ -215,6 +218,19 @@ fn recording_result(
         action_required_stream: result.action_required_stream,
         result: Box::new(future.boxed()),
     }
+}
+
+pub(super) fn leased_working_dir(
+    extension_lease: &StdMutex<Option<Arc<ExtensionLease>>>,
+    session: &Session,
+) -> PathBuf {
+    extension_lease
+        .lock()
+        .expect("extension lease unavailable")
+        .as_ref()
+        .filter(|lease| lease.scope_id() == session.id)
+        .and_then(|lease| lease.working_dir())
+        .map_or_else(|| session.working_dir.clone(), Path::to_path_buf)
 }
 
 fn session_in_lease(lease: &ExtensionLease, session: &Session) -> Session {

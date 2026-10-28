@@ -1,10 +1,14 @@
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
 use async_trait::async_trait;
 use goose_agent::post_tool_call_hook::PostToolCallHook;
 use rmcp::model::{CallToolResult, ErrorData};
 
+use crate::agents::extension_manager::ExtensionLease;
 use crate::agents::state_machine::ops_toolcalling::{
-    categorize_tool, emit_with_matcher, string_argument, ToolCategory,
+    categorize_tool, emit_with_matcher, leased_working_dir, string_argument, ToolCategory,
 };
 use crate::conversation::message::{ToolRequest, ToolResponse};
 use crate::conversation::Conversation;
@@ -13,11 +17,18 @@ use crate::session::Session;
 
 pub struct GoosePostToolHook {
     hook_manager: HookManager,
+    extension_lease: Arc<Mutex<Option<Arc<ExtensionLease>>>>,
 }
 
 impl GoosePostToolHook {
-    pub fn new(hook_manager: HookManager) -> Self {
-        Self { hook_manager }
+    pub fn new(
+        hook_manager: HookManager,
+        extension_lease: Arc<Mutex<Option<Arc<ExtensionLease>>>>,
+    ) -> Self {
+        Self {
+            hook_manager,
+            extension_lease,
+        }
     }
 }
 
@@ -37,10 +48,11 @@ impl PostToolCallHook<Session> for GoosePostToolHook {
             .arguments
             .as_ref()
             .map(|arguments| serde_json::Value::Object(arguments.clone()));
+        let working_dir = leased_working_dir(&self.extension_lease, session);
         let event = emit_post_tool_use(
             &self.hook_manager,
             &session.id,
-            &session.working_dir.to_string_lossy(),
+            &working_dir.to_string_lossy(),
             &tool_call.name,
             &request.id,
             tool_input.as_ref(),
@@ -52,7 +64,8 @@ impl PostToolCallHook<Session> for GoosePostToolHook {
                 &self.hook_manager,
                 &tool_call.name,
                 tool_input.as_ref(),
-                session,
+                &session.id,
+                &working_dir,
             )
             .await;
         }
@@ -64,7 +77,8 @@ async fn emit_extended_post_hooks(
     hook_manager: &HookManager,
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
-    session: &Session,
+    session_id: &str,
+    working_dir: &Path,
 ) {
     let (event, matcher) = match categorize_tool(tool_name) {
         ToolCategory::Shell => (
@@ -81,7 +95,8 @@ async fn emit_extended_post_hooks(
         emit_with_matcher(
             hook_manager,
             event,
-            session,
+            session_id,
+            working_dir,
             matcher,
             tool_name,
             tool_input.cloned(),

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use goose_agent::pre_tool_call_hook::{PreToolCallDecision, PreToolCallHook};
 
 use crate::agents::extension_manager::ExtensionLease;
-use crate::agents::state_machine::ops_toolcalling::{call_will_not_run, tool_span};
+use crate::agents::state_machine::ops_toolcalling::{
+    call_will_not_run, leased_working_dir, tool_span,
+};
 use crate::conversation::message::ToolRequest;
 use crate::conversation::Conversation;
 use crate::hooks::{HookChainOutcome, HookContext, HookDenial, HookEvent, HookManager};
@@ -86,16 +88,6 @@ impl GoosePreToolHook {
             extension_lease,
         }
     }
-
-    fn working_dir(&self, session: &Session) -> PathBuf {
-        self.extension_lease
-            .lock()
-            .expect("extension lease unavailable")
-            .as_ref()
-            .filter(|lease| lease.scope_id() == session.id)
-            .and_then(|lease| lease.working_dir())
-            .map_or_else(|| session.working_dir.clone(), Path::to_path_buf)
-    }
 }
 
 #[async_trait]
@@ -119,7 +111,7 @@ impl PreToolCallHook<Session> for GoosePreToolHook {
         let Some(denial) = pre_tool_use_denial(
             &self.hook_manager,
             &session.id,
-            &self.working_dir(session),
+            &leased_working_dir(&self.extension_lease, session),
             &request.id,
             &tool_call.name,
             tool_input.as_ref(),
