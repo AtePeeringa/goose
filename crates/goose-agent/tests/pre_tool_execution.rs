@@ -240,7 +240,7 @@ async fn allow_marks_the_call_true() {
 }
 
 #[tokio::test]
-async fn deny_marks_false_and_streams_an_error_response_with_the_reason() {
+async fn deny_streams_an_error_response_with_the_reason_and_leaves_no_mark() {
     let operation = PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Deny("no"))]));
 
     let outcome = run(&operation, vec![kickoff(), calls(&["a"])])
@@ -248,7 +248,7 @@ async fn deny_marks_false_and_streams_an_error_response_with_the_reason() {
         .unwrap();
 
     let expected = vec![("a".to_string(), "no".to_string())];
-    assert_eq!(outcome.marks, vec![("a".to_string(), false)]);
+    assert!(outcome.marks.is_empty());
     assert_eq!(outcome.responses(), expected);
     assert_eq!(outcome.shown_responses(), expected);
 }
@@ -296,11 +296,7 @@ async fn handles_a_mixed_batch_in_one_pass() {
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
     assert_eq!(
         outcome.marks,
-        vec![
-            ("a".to_string(), true),
-            ("b".to_string(), false),
-            ("c".to_string(), false),
-        ]
+        vec![("a".to_string(), true), ("c".to_string(), false),]
     );
     assert_eq!(
         outcome.responses(),

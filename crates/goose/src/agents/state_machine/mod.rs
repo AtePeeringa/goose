@@ -48,10 +48,10 @@ pub use goose_agent::operation::{
     InferenceInput, MachineEffect, Operation, OperationResult, RunStatus, SlashCommand, StepResult,
     CLIENT_LOG,
 };
-pub(super) use goose_agent::post_tool_execution::PostToolExecutionOperation;
 pub(super) use goose_agent::pre_tool_execution::PreToolExecutionOperation;
 pub(super) use goose_agent::stop_hook::StopHookOperation;
 pub(super) use goose_agent::subagent::SubagentOperation;
+pub(super) use goose_agent::unhandled_tool_calls::UnhandledToolCallsOperation;
 pub(crate) use tool_confirmation::{
     has_unapplied_tool_confirmation_response, pending_tool_confirmations,
     persist_tool_confirmation_decision,

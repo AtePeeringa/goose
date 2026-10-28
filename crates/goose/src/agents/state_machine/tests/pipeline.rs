@@ -1172,7 +1172,7 @@ const TOOL_OPERATIONS: [&str; 6] = [
     "recipe",
     "tool_execution",
     "remaining_tool_calls",
-    "post_tool_execution",
+    "unhandled_tool_calls",
 ];
 
 fn assert_only_tool_operations_act_on_open_calls(session: &Session, applied_step: Option<&str>) {

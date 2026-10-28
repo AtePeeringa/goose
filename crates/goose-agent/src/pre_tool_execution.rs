@@ -101,7 +101,6 @@ fn apply_decision(
             effects.push(mark_executable(&request.id, true));
         }
         PreToolCallDecision::Deny { reason } => {
-            effects.push(mark_executable(&request.id, false));
             add_error_response(tool_responses, request, &reason);
         }
         PreToolCallDecision::Ask { prompt } => {

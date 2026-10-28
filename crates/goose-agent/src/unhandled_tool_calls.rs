@@ -8,19 +8,19 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, yielded, ConversationEffect, Emitter,
     Operation, OperationResult,
 };
-use crate::tool_call_state::{add_error_response, mark_executable, tool_calls, ToolCallState};
+use crate::tool_call_state::{add_error_response, tool_calls, ToolCallState};
 
 pub const NOT_HANDLED_MESSAGE: &str = "This tool call was not handled.";
 
-pub struct PostToolExecutionOperation;
+pub struct UnhandledToolCallsOperation;
 
-impl PostToolExecutionOperation {
+impl UnhandledToolCallsOperation {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for PostToolExecutionOperation {
+impl Default for UnhandledToolCallsOperation {
     fn default() -> Self {
         Self::new()
     }
@@ -34,7 +34,6 @@ fn respond_to_unhandled_calls(
     let mut tool_responses = Message::user();
     for (request, state) in calls {
         if *state != ToolCallState::AwaitingConfirmation {
-            effects.push(mark_executable(&request.id, false));
             add_error_response(&mut tool_responses, request, NOT_HANDLED_MESSAGE);
         }
     }
@@ -48,13 +47,13 @@ fn respond_to_unhandled_calls(
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S, E> Operation<S, E> for PostToolExecutionOperation
+impl<S, E> Operation<S, E> for UnhandledToolCallsOperation
 where
     S: MaybeSend + MaybeSync + 'static,
     E: From<ConversationEffect> + MaybeSend + 'static,
 {
     fn name(&self) -> &'static str {
-        "post_tool_execution"
+        "unhandled_tool_calls"
     }
 
     async fn run(

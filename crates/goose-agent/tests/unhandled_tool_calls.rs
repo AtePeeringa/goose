@@ -1,7 +1,7 @@
 use goose_agent::{
     operation::{ConversationEffect, Emitter, Operation, OperationResult, RunStatus},
-    post_tool_execution::{PostToolExecutionOperation, NOT_HANDLED_MESSAGE},
     pre_tool_execution::EXECUTABLE_KEY,
+    unhandled_tool_calls::{UnhandledToolCallsOperation, NOT_HANDLED_MESSAGE},
 };
 use goose_provider_types::conversation::{
     message::{Message, MessageContent, TOOL_META_EXTERNAL_DISPATCH_KEY},
@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct Outcome {
     status: Option<RunStatus>,
-    executable_marks: Vec<(String, bool)>,
     responses: Vec<(String, String)>,
 }
 
@@ -24,7 +23,7 @@ async fn run(messages: Vec<Message>) -> Outcome {
     let emit = Emitter::new(tx, CancellationToken::new());
     let conversation = Conversation::new_unvalidated(messages);
     let result = Operation::<(), ConversationEffect>::run(
-        &PostToolExecutionOperation::new(),
+        &UnhandledToolCallsOperation::new(),
         &(),
         &conversation,
         &emit,
@@ -40,13 +39,6 @@ async fn run(messages: Vec<Message>) -> Outcome {
     };
     for effect in result.effects {
         match effect {
-            ConversationEffect::PatchToolRequestMeta {
-                tool_call_id,
-                patch,
-            } => {
-                let executable = patch.get(EXECUTABLE_KEY).unwrap().as_bool().unwrap();
-                outcome.executable_marks.push((tool_call_id, executable));
-            }
             ConversationEffect::AppendMessage(message) => {
                 outcome
                     .responses
@@ -138,14 +130,6 @@ async fn responds_to_open_calls_that_are_not_awaiting_confirmation() {
             not_handled("allowed"),
             not_handled("unchecked"),
             not_handled("declined"),
-        ]
-    );
-    assert_eq!(
-        outcome.executable_marks,
-        vec![
-            ("allowed".to_string(), false),
-            ("unchecked".to_string(), false),
-            ("declined".to_string(), false),
         ]
     );
 }

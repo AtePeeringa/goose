@@ -11,11 +11,11 @@ use crate::agents::state_machine::{
     deny_limit_warning, BangShellOperation, CompactionOperation, DoctorOperation,
     EmptyResponseOperation, ExitOnErrorOperation, GooseEffect, GooseInferenceProvider,
     GooseInferenceRequestPreparer, GoosePostToolHook, GoosePreToolHook, GooseStopHook,
-    InferenceRunner, MaxTurnsOperation, Operation, PostToolExecutionOperation,
-    PreToolExecutionOperation, ProjectOperation, RecipeOperation, RemainingToolCallsOperation,
-    RetryOperation, SkillOperation, SlashCommandOperation, StateMachine, StatusOperation,
-    SteerOperation, SteerQueue, Step, StopHookOperation, SubagentOperation, ToolExecutionOperation,
-    ToolPairCompactionOperation,
+    InferenceRunner, MaxTurnsOperation, Operation, PreToolExecutionOperation, ProjectOperation,
+    RecipeOperation, RemainingToolCallsOperation, RetryOperation, SkillOperation,
+    SlashCommandOperation, StateMachine, StatusOperation, SteerOperation, SteerQueue, Step,
+    StopHookOperation, SubagentOperation, ToolExecutionOperation, ToolPairCompactionOperation,
+    UnhandledToolCallsOperation,
 };
 use crate::agents::subagent_handler::ForegroundSubagentRunner;
 use crate::agents::tool_execution::DECLINED_RESPONSE;
@@ -103,7 +103,7 @@ pub(crate) fn build_state_machine(
             hook_manager.clone(),
             post_tool_call_hook,
         )),
-        Arc::new(PostToolExecutionOperation::new()),
+        Arc::new(UnhandledToolCallsOperation::new()),
         Arc::new(
             SubagentOperation::new(Arc::new(subagent_runner)).with_max_concurrency(
                 Config::global()

@@ -95,7 +95,7 @@ with `with_declined_message`.
 Good to know:
 
 - Put `PreToolExecutionOperation` before every step that runs tools, and
-  `PostToolExecutionOperation` after them. Allowed calls run while others wait
+  `UnhandledToolCallsOperation` after them. Allowed calls run while others wait
   for the user.
 - Show the confirmation request to the user only after it is saved, so the
   user can't choose before it exists. The operation saves it but doesn't send it.
@@ -115,7 +115,7 @@ the result is still saved. If you write your own step that runs tools, call
 `after_call` after each call yourself and decide what an error means; otherwise
 its calls get no post-tool hook.
 
-`PostToolExecutionOperation` is needed with `PreToolExecutionOperation`. Put it
+`UnhandledToolCallsOperation` is needed with `PreToolExecutionOperation`. Put it
 after every step that runs tools, right before inference. It gives calls no step handled a "not handled" error result, and it
 pauses the run while calls wait for the user, so the model isn't called with
 calls still open. A step that runs tools after it gets "not handled" for its
