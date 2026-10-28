@@ -18,9 +18,7 @@ use tracing::warn;
 use crate::action_required_manager::ActionRequiredManager;
 use crate::container::Container;
 use crate::extension::{name_to_key, ExtensionConfig, ExtensionError, ExtensionResult};
-use crate::mcp_client::{
-    ConnectContext, GooseMcpClientCapabilities, GooseMcpHostInfo, McpClientTrait,
-};
+use crate::mcp_client::{ConnectContext, GooseMcpClientCapabilities, McpClientTrait};
 use crate::tool_execution::ToolCallResult;
 use host::{ExtensionHost, ExtensionSession};
 use rmcp::model::{CallToolResult, ErrorCode, ErrorData, MetaObject, ServerConfig, Tool};
@@ -209,7 +207,10 @@ impl ExtensionSlot {
     /// checked after this process wrote config, so a lease does not read the keyring.
     async fn config_is_current(&self) -> bool {
         let Some(manager) = self.manager.upgrade() else {
-            return false;
+            return self
+                .runtime
+                .get()
+                .is_some_and(|runtime| matches!(runtime, Runtime::Running(_)));
         };
         let generation = manager.host.config_generation();
         if self.config_generation.load(Ordering::SeqCst) == generation {
@@ -1041,6 +1042,20 @@ impl ExtensionManager {
         client: McpClientBox,
         info: Option<ServerConfig>,
     ) {
+        self.install_client(session_id, config.clone(), client, info)
+            .await;
+        if let Err(error) = self.select(session_id, config).await {
+            warn!(%error, "failed to select injected extension");
+        }
+    }
+
+    pub async fn install_client(
+        &self,
+        session_id: &str,
+        config: ExtensionConfig,
+        client: McpClientBox,
+        info: Option<ServerConfig>,
+    ) {
         let key = config.key();
         let negotiation = self.client(session_id);
         self.install(
@@ -1067,10 +1082,6 @@ impl ExtensionManager {
             },
         )
         .await;
-        // Otherwise the next lease, built from the record, drops the slot.
-        if let Err(error) = self.select(session_id, config).await {
-            warn!(%error, "failed to select injected extension");
-        }
     }
 
     /// Processes stop once no lease holds them.

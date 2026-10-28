@@ -67,7 +67,6 @@ use goose_agent::extension::Envs;
 use goose_agent::extension::ExtensionConfig;
 use goose_agent::extension_manager::ExtensionLoadResult;
 use goose_agent::mcp_client::GooseMcpHostInfo;
-use goose_agent::mcp_client::McpClientTrait;
 use goose_providers::errors::ProviderError;
 use rmcp::model::{
     Annotations as RmcpAnnotations, ImageContent as RmcpImageContent, Role,

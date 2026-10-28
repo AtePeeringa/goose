@@ -53,6 +53,7 @@ tokio = { workspace = true, features = ["process", "net", "io-util", "rt-multi-t
 tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 url.workspace = true
+blake3 = "1.8.7"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 serial_test.workspace = true

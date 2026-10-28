@@ -4,6 +4,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use goose::agents::{AgentEvent, GoosePlatform, StateMachineServices, StateMachineServicesConfig};
 use goose::config::extensions::{set_extension, ExtensionEntry};
+use goose_agent::extension::ExtensionConfig;
 
 #[cfg(test)]
 mod tests {
@@ -19,7 +20,6 @@ mod tests {
         };
         use goose::agents::{ScheduleTool, StateMachineServicesConfig};
         use goose::config::permission::PermissionManager;
-        use goose_agent::extension::ExtensionConfig;
 
         use goose::scheduler::{ScheduledJob, SchedulerError, ValidatedScheduleRecipe};
         use goose::scheduler_trait::SchedulerTrait;

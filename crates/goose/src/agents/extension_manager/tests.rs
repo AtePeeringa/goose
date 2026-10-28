@@ -1217,7 +1217,7 @@ async fn successful_mutation_is_persisted_when_another_mutation_fails() {
 
     let successful = manager.apply(
         ExtensionMutation::Enable {
-            name: "analyze".to_string(),
+            name: "todo".to_string(),
         },
         &session.id,
     );
@@ -1229,7 +1229,7 @@ async fn successful_mutation_is_persisted_when_another_mutation_fails() {
     );
     let (successful, failed) = tokio::join!(successful, failed);
 
-    assert!(successful.is_ok());
+    assert!(successful.is_ok(), "{successful:?}");
     assert!(failed.is_err());
     let stored_session = manager
         .get_context()
@@ -1242,5 +1242,28 @@ async fn successful_mutation_is_persisted_when_another_mutation_fails() {
     assert!(stored_extensions
         .extensions
         .iter()
-        .any(|config| config.key() == "analyze"));
+        .any(|config| config.key() == "todo"));
+}
+
+impl ExtensionManager {
+    pub(crate) async fn add_test_client(
+        &self,
+        session_id: &str,
+        config: ExtensionConfig,
+        client: Arc<dyn McpClientTrait>,
+        info: Option<rmcp::model::ServerConfig>,
+    ) {
+        self.add_client(session_id, config, client, info).await;
+    }
+
+    #[cfg(feature = "code-mode")]
+    pub(crate) async fn install_test_client(
+        &self,
+        session_id: &str,
+        config: ExtensionConfig,
+        client: Arc<dyn McpClientTrait>,
+        info: Option<rmcp::model::ServerConfig>,
+    ) {
+        self.install_client(session_id, config, client, info).await;
+    }
 }
