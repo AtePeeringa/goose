@@ -14,7 +14,7 @@ use crate::agents::state_machine::ops_toolcalling::{
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, Emitter, Operation, OperationResult,
 };
-use crate::agents::tool_execution::{CHAT_MODE_TOOL_SKIPPED_RESPONSE, DECLINED_RESPONSE};
+use crate::agents::tool_execution::CHAT_MODE_TOOL_SKIPPED_RESPONSE;
 use crate::config::GooseMode;
 use crate::conversation::message::Message;
 use crate::conversation::Conversation;
@@ -52,14 +52,9 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
         let messages = messages_since_kickoff(conversation)?;
         let pending: Vec<_> = pending_tool_requests(messages)
             .into_iter()
-            .filter(|(request, disposition)| {
-                // Reserve for RecipeOperation only the final-output calls it will
-                // actually execute. A declined one is left here so it still gets a
-                // response; RecipeOperation matches on Execute alone and would
-                // otherwise leave the request unanswered, which strict providers can
-                // reject on the next request.
+            .filter(|(request, _)| {
+                // Reserve for RecipeOperation the final-output calls it will execute.
                 !(active_final_output
-                    && *disposition == ToolDisposition::Execute
                     && request_was_advertised(messages, request)
                     && request
                         .tool_call
@@ -145,12 +140,6 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
                         ),
                     }
                 }
-                ToolDisposition::Decline => (
-                    Ok(CallToolResult::error(vec![ContentBlock::text(
-                        DECLINED_RESPONSE,
-                    )])),
-                    false,
-                ),
             };
             let mut metadata = request.metadata.clone();
             if unclaimed {

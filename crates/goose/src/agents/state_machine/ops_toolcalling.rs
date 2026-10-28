@@ -15,7 +15,7 @@ use crate::agents::state_machine::{
     GooseEffect, Operation, OperationResult, SlashCommand,
 };
 use crate::agents::tool_execution::{
-    tool_stream, ToolCallResult, ToolStreamItem, CHAT_MODE_TOOL_SKIPPED_RESPONSE, DECLINED_RESPONSE,
+    tool_stream, ToolCallResult, ToolStreamItem, CHAT_MODE_TOOL_SKIPPED_RESPONSE,
 };
 use crate::agents::AgentEvent;
 use crate::config::GooseMode;
@@ -617,28 +617,10 @@ impl ToolExecutionOperation {
 }
 
 pub(super) fn pending_tool_requests(messages: &[Message]) -> Vec<(ToolRequest, ToolDisposition)> {
-    let mut answered = HashSet::new();
-    let mut approval_requests = HashSet::new();
-    let mut approvals = std::collections::HashMap::new();
-    for message in messages {
-        for content in &message.content {
-            match content {
-                MessageContent::ToolResponse(response) => {
-                    answered.insert(response.id.clone());
-                }
-                MessageContent::ActionRequired(action) => match &action.data {
-                    ActionRequiredData::ToolConfirmation { id, .. } => {
-                        approval_requests.insert(id.clone());
-                    }
-                    ActionRequiredData::ToolConfirmationResponse { id, permission } => {
-                        approvals.insert(id.clone(), permission.clone());
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-    }
+    let answered: HashSet<&str> = messages
+        .iter()
+        .flat_map(Message::get_tool_response_ids)
+        .collect();
 
     messages
         .iter()
@@ -646,25 +628,15 @@ pub(super) fn pending_tool_requests(messages: &[Message]) -> Vec<(ToolRequest, T
         .flat_map(|message| {
             message.content.iter().filter_map(|c| match c {
                 MessageContent::ToolRequest(req) if req.was_executed_externally() => None,
-                MessageContent::ToolRequest(req) if !answered.contains(&req.id) => {
+                MessageContent::ToolRequest(req) if !answered.contains(req.id.as_str()) => {
                     if let Err(parse_error) = &req.tool_call {
                         return Some((
                             req.clone(),
                             ToolDisposition::ParseError(parse_error.to_string()),
                         ));
                     }
-                    match request_executable(req).unwrap_or(true) {
-                        true => Some((req.clone(), ToolDisposition::Execute)),
-                        false => {
-                            if approval_requests.contains(&req.id)
-                                && !approval_denied(approvals.get(&req.id))
-                            {
-                                None
-                            } else {
-                                Some((req.clone(), ToolDisposition::Decline))
-                            }
-                        }
-                    }
+                    (request_executable(req) != Some(false))
+                        .then(|| (req.clone(), ToolDisposition::Execute))
                 }
                 _ => None,
             })
@@ -738,19 +710,7 @@ fn request_has_approval_history(messages: &[Message], request: &ToolRequest) -> 
 #[derive(Clone, Eq, PartialEq)]
 pub(super) enum ToolDisposition {
     Execute,
-    Decline,
     ParseError(String),
-}
-
-fn approval_denied(permission: Option<&crate::permission::Permission>) -> bool {
-    matches!(
-        permission,
-        Some(
-            crate::permission::Permission::DenyOnce
-                | crate::permission::Permission::AlwaysDeny
-                | crate::permission::Permission::Cancel
-        )
-    )
 }
 
 #[async_trait]
@@ -903,9 +863,6 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
                     ToolDisposition::Execute => {
                         CallToolResult::error(vec![ContentBlock::text(EXPIRED_APPROVAL_RESPONSE)])
                     }
-                    ToolDisposition::Decline => CallToolResult::error(vec![ContentBlock::text(
-                        DECLINED_RESPONSE,
-                    )]),
                     ToolDisposition::ParseError(parse_error) => {
                         CallToolResult::error(vec![ContentBlock::text(format!(
                             "The tool call could not be parsed: {parse_error}. Correct the arguments and try again."
@@ -999,15 +956,6 @@ impl Operation<Session, GooseEffect> for ToolExecutionOperation {
             let mut batch = self.batch.lock().unwrap();
             match disposition {
                 ToolDisposition::Execute => {}
-                ToolDisposition::Decline => {
-                    batch.record(
-                        &request.id,
-                        Ok(CallToolResult::error(vec![ContentBlock::text(
-                            DECLINED_RESPONSE,
-                        )])),
-                        request.metadata.as_ref(),
-                    );
-                }
                 ToolDisposition::ParseError(parse_error) => {
                     batch.record(
                         &request.id,
