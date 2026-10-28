@@ -16,7 +16,9 @@ Each harness attempted every task five times, for 310 scored trials per harness.
 
 ## Results
 
-goose matched Codex CLI, OpenCode and Hermes Agent on pass rate at 15 to 43% lower cost per task, and tied pi on both.
+goose matched Codex CLI, OpenCode and Hermes Agent on pass rate.
+Its cost per task was 15 to 43% lower.
+pi tied goose on both.
 
 ![Scatter plot of pass rate against cost per trial for five agent harnesses on Terminal-Bench 4.0 with gpt-6.1-sol. All pass-rate confidence intervals overlap between roughly 49% and 54%, while cost ranges from $0.67 for goose and pi to $1.14 for Hermes Agent.](/img/blog/harness-benchmark-tb4.png)
 
