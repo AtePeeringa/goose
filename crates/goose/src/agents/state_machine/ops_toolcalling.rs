@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
-use goose_agent::pre_tool_execution::{request_executable, EXECUTABLE_KEY};
+use goose_agent::pre_tool_execution::{mark_executable, request_executable};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, Role, Tool};
 
 use crate::agents::extension_manager::{CallRequest, ExtensionLease, ExtensionManager};
@@ -248,20 +248,12 @@ pub(super) async fn emit_post_tool_use(
     event
 }
 
-pub(super) fn mark_not_run(tool_call_id: &str) -> GooseEffect {
-    ConversationEffect::PatchToolRequestMeta {
-        tool_call_id: tool_call_id.to_string(),
-        patch: serde_json::json!({ EXECUTABLE_KEY: false }),
-    }
-    .into()
-}
-
 pub(super) fn answered_without_running(response: Message, emit: &Emitter) -> Vec<GooseEffect> {
     let mut effects: Vec<GooseEffect> = response
         .content
         .iter()
         .filter_map(MessageContent::as_tool_response)
-        .map(|answer| mark_not_run(&answer.id))
+        .map(|answer| mark_executable(&answer.id, false).into())
         .collect();
     effects.push(emit.message(response).into());
     effects

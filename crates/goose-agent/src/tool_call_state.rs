@@ -86,7 +86,7 @@ pub fn request_executable(request: &ToolRequest) -> Option<bool> {
     tool_meta_value(request, EXECUTABLE_KEY)
 }
 
-pub(crate) fn mark_executable(tool_call_id: &str, executable: bool) -> ConversationEffect {
+pub fn mark_executable(tool_call_id: &str, executable: bool) -> ConversationEffect {
     ConversationEffect::PatchToolRequestMeta {
         tool_call_id: tool_call_id.to_string(),
         patch: serde_json::json!({ EXECUTABLE_KEY: executable }),

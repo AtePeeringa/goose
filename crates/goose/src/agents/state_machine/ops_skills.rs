@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use goose_agent::pre_tool_execution::mark_executable;
 use goose_sdk_types::custom_requests::{SourceEntry, SourceType};
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData, JsonObject, Tool};
 use schemars::{schema_for, JsonSchema};
@@ -13,8 +14,7 @@ use serde_json::Value;
 
 use crate::agents::extension_manager::ExtensionLease;
 use crate::agents::state_machine::ops_toolcalling::{
-    mark_not_run, pending_advertised_tool_requests, tool_span, ToolDisposition,
-    EXPIRED_APPROVAL_RESPONSE,
+    pending_advertised_tool_requests, tool_span, ToolDisposition, EXPIRED_APPROVAL_RESPONSE,
 };
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect, Emitter,
@@ -335,14 +335,14 @@ impl Operation<Session, GooseEffect> for SkillOperation {
         for (request, disposition) in pending {
             let result: std::result::Result<CallToolResult, ErrorData> = match disposition {
                 ToolDisposition::Execute if session.goose_mode == GooseMode::Chat => {
-                    effects.push(mark_not_run(&request.id));
+                    effects.push(mark_executable(&request.id, false).into());
                     Ok(CallToolResult::success(vec![ContentBlock::text(
                         CHAT_MODE_TOOL_SKIPPED_RESPONSE,
                     )]))
                 }
                 ToolDisposition::Execute => {
                     let Some(session) = leased_session.as_ref() else {
-                        effects.push(mark_not_run(&request.id));
+                        effects.push(mark_executable(&request.id, false).into());
                         response.add_tool_response_with_metadata(
                             request.id,
                             Ok(CallToolResult::error(vec![ContentBlock::text(

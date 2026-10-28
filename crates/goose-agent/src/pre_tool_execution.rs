@@ -12,8 +12,8 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, ConversationEffect, Emitter, Operation,
     OperationResult,
 };
-use crate::tool_call_state::{add_error_response, mark_executable, tool_calls, ToolCallState};
-pub use crate::tool_call_state::{request_executable, EXECUTABLE_KEY};
+use crate::tool_call_state::{add_error_response, tool_calls, ToolCallState};
+pub use crate::tool_call_state::{mark_executable, request_executable, EXECUTABLE_KEY};
 
 pub const DEFAULT_DECLINED_MESSAGE: &str = "The user declined to run this tool.";
 
