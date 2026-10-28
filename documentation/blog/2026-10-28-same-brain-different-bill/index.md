@@ -7,22 +7,27 @@ authors:
 tags: [gdk]
 ---
 
-![Scatter plot of pass rate against cost per trial for five agent harnesses on Terminal-Bench 4.0 with gpt-6.1-sol. All pass-rate confidence intervals overlap between roughly 49% and 54%, while cost ranges from $0.67 for goose and pi to $1.14 for Hermes Agent.](/img/blog/harness-benchmark-tb4.png)
+Coding benchmarks are mostly about which frontier model solves the most tasks.
+Now that [tokens are no longer free](https://douwe.com/blog/2026/0518/), what it costs to solve them matters just as much.
+Between the model and the bill sits the harness, which builds every request and decides how often to call the model and how much context to send.
 
-Most agent benchmarks change the model and keep the harness fixed.
-We did the opposite, to find out how much of an agent's results and cost come from the harness.
-
-We ran five open harnesses (goose, Codex CLI, OpenCode, Hermes Agent and pi) on Terminal-Bench 4 with the same model, gpt-6.1-sol at high reasoning effort.
+To see how much that layer matters, we gave five open harnesses (goose, Codex CLI, OpenCode, Hermes Agent and pi) the same model, gpt-6.1-sol at high reasoning effort, and the same Terminal-Bench 4 tasks.
 Each harness attempted every task five times, for 310 scored trials per harness.
+
+## Results
 
 goose matched Codex CLI, OpenCode and Hermes Agent on pass rate at 15 to 43% lower cost per task, and tied pi on both.
 
+![Scatter plot of pass rate against cost per trial for five agent harnesses on Terminal-Bench 4.0 with gpt-6.1-sol. All pass-rate confidence intervals overlap between roughly 49% and 54%, while cost ranges from $0.67 for goose and pi to $1.14 for Hermes Agent.](/img/blog/harness-benchmark-tb4.png)
+
 <!-- truncate -->
 
-## On pass rate, we found no difference
-
-All five landed within about six points of each other, and none differed from goose at 95% confidence.
+All five landed within about six points of each other on pass rate, and none differed from goose at 95% confidence.
 With the same model underneath, no harness solved noticeably more tasks.
+
+Cost is a different story.
+Compared task by task, Codex cost 31% more than goose, OpenCode 18% more and Hermes Agent 75% more, all significant at 95%.
+pi cost about the same as goose.
 
 | Harness | Pass rate | Cost per trial | Cost per solved task |
 | --- | --- | --- | --- |
@@ -31,11 +36,6 @@ With the same model underneath, no harness solved noticeably more tasks.
 | OpenCode | 53.9% | $0.83 | $1.54 |
 | Codex CLI | 54.8% | $0.88 | $1.60 |
 | Hermes Agent | 52.3% | $1.14 | $2.19 |
-
-## On cost, they are not close
-
-Compared task by task, Codex cost 31% more than goose, OpenCode 18% more and Hermes Agent 75% more, all significant at 95%.
-pi cost about the same as goose.
 
 ## How we ran it
 
