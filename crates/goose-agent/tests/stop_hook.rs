@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use goose_agent::{
     events::AgentEvent,
     operation::{ConversationEffect, Emitter, Operation, OperationResult, RunStatus},
-    stop_hook::{StopHook, StopHookDecision, StopHookOperation, DENIED},
+    stop_hook::{StopHook, StopHookDecision, StopHookOperation},
 };
 use goose_provider_types::conversation::{
     message::{Message, MessageContent, SystemNotificationType},
@@ -18,24 +18,28 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Copy)]
+enum Reply {
+    Allow,
+    Deny(&'static str),
+    Fail,
+}
+
 struct FakeHook {
-    deny_with: Option<&'static str>,
+    reply: Reply,
     calls: AtomicUsize,
 }
 
 impl FakeHook {
-    fn allowing() -> Arc<Self> {
+    fn new(reply: Reply) -> Arc<Self> {
         Arc::new(Self {
-            deny_with: None,
+            reply,
             calls: AtomicUsize::new(0),
         })
     }
 
-    fn denying(reason: &'static str) -> Arc<Self> {
-        Arc::new(Self {
-            deny_with: Some(reason),
-            calls: AtomicUsize::new(0),
-        })
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 }
 
@@ -47,26 +51,14 @@ impl StopHook<()> for FakeHook {
         _conversation: &Conversation,
     ) -> Result<StopHookDecision> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let Some(reason) = self.deny_with else {
-            return Ok(StopHookDecision::Allow);
-        };
-        Ok(StopHookDecision::Deny {
-            reason: reason.to_string(),
-            user_message: Some(notice("hook denied")),
-        })
-    }
-}
-
-struct FailingHook;
-
-#[async_trait]
-impl StopHook<()> for FailingHook {
-    async fn on_stop(
-        &self,
-        _session: &(),
-        _conversation: &Conversation,
-    ) -> Result<StopHookDecision> {
-        anyhow::bail!("stop hook crashed")
+        match self.reply {
+            Reply::Allow => Ok(StopHookDecision::Allow),
+            Reply::Deny(reason) => Ok(StopHookDecision::Deny {
+                reason: reason.to_string(),
+                user_message: Some(notice("hook denied")),
+            }),
+            Reply::Fail => anyhow::bail!("stop hook crashed"),
+        }
     }
 }
 
@@ -91,28 +83,23 @@ struct Outcome {
     shown: Vec<String>,
 }
 
-async fn run(operation: &StopHookOperation<()>, messages: Vec<Message>) -> Outcome {
+async fn run(operation: &StopHookOperation<()>, messages: Vec<Message>) -> Result<Outcome> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let emit = Emitter::new(tx, CancellationToken::new());
     let conversation = Conversation::new_unvalidated(messages);
-    let result = Operation::<(), ConversationEffect>::run(operation, &(), &conversation, &emit)
-        .await
-        .unwrap();
+    let result =
+        Operation::<(), ConversationEffect>::run(operation, &(), &conversation, &emit).await?;
     let shown = std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|event| match event {
             AgentEvent::Message(message) => Some(notification_text(&message)),
             _ => None,
         })
         .collect();
-    match result {
-        OperationResult::NotApplicable => Outcome {
-            status: None,
-            appended: Vec::new(),
-            shown,
-        },
-        OperationResult::Applied(result) => Outcome {
-            status: Some(result.status),
-            appended: result
+    let (status, appended) = match result {
+        OperationResult::NotApplicable => (None, Vec::new()),
+        OperationResult::Applied(result) => (
+            Some(result.status),
+            result
                 .effects
                 .into_iter()
                 .map(|effect| match effect {
@@ -120,9 +107,27 @@ async fn run(operation: &StopHookOperation<()>, messages: Vec<Message>) -> Outco
                     _ => panic!("expected an appended message"),
                 })
                 .collect(),
-            shown,
-        },
-    }
+        ),
+    };
+    Ok(Outcome {
+        status,
+        appended,
+        shown,
+    })
+}
+
+fn finished_turn() -> Vec<Message> {
+    vec![
+        Message::user().with_text("hi"),
+        Message::assistant().with_text("done"),
+    ]
+}
+
+fn denied_once_then_finished() -> Vec<Message> {
+    let mut messages = finished_turn();
+    messages.push(denial_message());
+    messages.push(Message::assistant().with_text("done again"));
+    messages
 }
 
 fn denial_message() -> Message {
@@ -131,152 +136,104 @@ fn denial_message() -> Message {
         .with_visibility(false, true);
     message
         .metadata
-        .set_operation_note("stop_hook", DENIED, json!(true));
+        .set_operation_note("stop_hook", "denied", json!(true));
     message
 }
 
 fn is_denied(message: &Message) -> bool {
     message
         .metadata
-        .operation_note("stop_hook", DENIED)
+        .operation_note("stop_hook", "denied")
         .is_some()
 }
 
 #[tokio::test]
-async fn does_nothing_before_the_turn_ends() {
-    let hook = FakeHook::denying("keep going");
-    let operation = StopHookOperation::new(hook.clone());
+async fn does_nothing_before_the_turn_ends() -> Result<()> {
+    let hook = FakeHook::new(Reply::Deny("keep going"));
 
-    let outcome = run(&operation, vec![Message::user().with_text("hi")]).await;
+    let outcome = run(
+        &StopHookOperation::new(hook.clone()),
+        vec![Message::user().with_text("hi")],
+    )
+    .await?;
 
     assert!(outcome.status.is_none());
-    assert_eq!(hook.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(hook.calls(), 0);
+    Ok(())
 }
 
 #[tokio::test]
-async fn allow_ends_the_turn() {
-    let hook = FakeHook::allowing();
-    let operation = StopHookOperation::new(hook.clone());
+async fn allow_ends_the_turn() -> Result<()> {
+    let hook = FakeHook::new(Reply::Allow);
 
-    let outcome = run(
-        &operation,
-        vec![
-            Message::user().with_text("hi"),
-            Message::assistant().with_text("done"),
-        ],
-    )
-    .await;
+    let outcome = run(&StopHookOperation::new(hook.clone()), finished_turn()).await?;
 
     assert_eq!(outcome.status, Some(RunStatus::Yielded));
     assert!(outcome.appended.is_empty());
-    assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(hook.calls(), 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn deny_adds_a_marked_denial_message_and_shows_the_user_message() {
-    let operation = StopHookOperation::new(FakeHook::denying("keep going"));
+async fn deny_adds_a_marked_denial_message_and_shows_the_user_message() -> Result<()> {
+    let operation = StopHookOperation::new(FakeHook::new(Reply::Deny("keep going")));
 
-    let outcome = run(
-        &operation,
-        vec![
-            Message::user().with_text("hi"),
-            Message::assistant().with_text("done"),
-        ],
-    )
-    .await;
+    let outcome = run(&operation, finished_turn()).await?;
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
-    assert_eq!(outcome.appended.len(), 1);
-    assert_eq!(outcome.appended[0].as_concat_text(), "keep going");
-    assert!(is_denied(&outcome.appended[0]));
-    assert!(!outcome.appended[0].is_user_visible());
-    assert!(outcome.appended[0].is_agent_visible());
+    let [denial] = outcome.appended.as_slice() else {
+        panic!("expected one denial message");
+    };
+    assert_eq!(denial.as_concat_text(), "keep going");
+    assert!(is_denied(denial));
+    assert!(!denial.is_user_visible());
+    assert!(denial.is_agent_visible());
     assert_eq!(outcome.shown, vec!["hook denied"]);
+    Ok(())
 }
 
 #[tokio::test]
-async fn past_the_deny_limit_the_turn_ends_with_the_limit_message() {
-    let operation = StopHookOperation::new(FakeHook::denying("keep going"))
-        .with_deny_limit_per_turn(1)
-        .with_deny_limit_message(|| notice("deny limit reached"));
+async fn past_the_deny_limit_the_turn_ends_with_the_limit_message_if_set() -> Result<()> {
+    let limited = || {
+        StopHookOperation::new(FakeHook::new(Reply::Deny("keep going"))).with_deny_limit_per_turn(1)
+    };
 
-    let outcome = run(
-        &operation,
-        vec![
-            Message::user().with_text("hi"),
-            Message::assistant().with_text("done"),
-            denial_message(),
-            Message::assistant().with_text("done again"),
-        ],
-    )
-    .await;
+    for (operation, expected) in [
+        (
+            limited().with_deny_limit_message(|| notice("deny limit reached")),
+            vec!["deny limit reached"],
+        ),
+        (limited(), vec![]),
+    ] {
+        let outcome = run(&operation, denied_once_then_finished()).await?;
 
-    assert_eq!(outcome.status, Some(RunStatus::Yielded));
-    assert_eq!(outcome.appended.len(), 1);
-    assert_eq!(
-        notification_text(&outcome.appended[0]),
-        "deny limit reached"
-    );
-    assert_eq!(outcome.shown, vec!["deny limit reached"]);
+        assert_eq!(outcome.status, Some(RunStatus::Yielded));
+        let appended: Vec<_> = outcome.appended.iter().map(notification_text).collect();
+        assert_eq!(appended, expected);
+        assert_eq!(outcome.shown, expected);
+    }
+    Ok(())
 }
 
 #[tokio::test]
-async fn past_the_deny_limit_without_a_message_the_turn_ends_quietly() {
-    let operation =
-        StopHookOperation::new(FakeHook::denying("keep going")).with_deny_limit_per_turn(1);
+async fn the_deny_limit_counts_only_the_current_turn() -> Result<()> {
+    let operation = StopHookOperation::new(FakeHook::new(Reply::Deny("keep going")))
+        .with_deny_limit_per_turn(1);
+    let mut messages = denied_once_then_finished();
+    messages.extend(finished_turn());
 
-    let outcome = run(
-        &operation,
-        vec![
-            Message::user().with_text("hi"),
-            Message::assistant().with_text("done"),
-            denial_message(),
-            Message::assistant().with_text("done again"),
-        ],
-    )
-    .await;
-
-    assert_eq!(outcome.status, Some(RunStatus::Yielded));
-    assert!(outcome.appended.is_empty());
-    assert!(outcome.shown.is_empty());
-}
-
-#[tokio::test]
-async fn the_deny_limit_counts_only_the_current_turn() {
-    let operation =
-        StopHookOperation::new(FakeHook::denying("keep going")).with_deny_limit_per_turn(1);
-
-    let outcome = run(
-        &operation,
-        vec![
-            Message::user().with_text("first"),
-            Message::assistant().with_text("done"),
-            denial_message(),
-            Message::assistant().with_text("done again"),
-            Message::user().with_text("second"),
-            Message::assistant().with_text("done"),
-        ],
-    )
-    .await;
+    let outcome = run(&operation, messages).await?;
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
     assert!(is_denied(&outcome.appended[0]));
+    Ok(())
 }
 
 #[tokio::test]
 async fn a_failing_hook_fails_the_operation() {
-    let operation = StopHookOperation::new(Arc::new(FailingHook));
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let emit = Emitter::new(tx, CancellationToken::new());
-    let conversation = Conversation::new_unvalidated([
-        Message::user().with_text("hi"),
-        Message::assistant().with_text("done"),
-    ]);
+    let operation = StopHookOperation::new(FakeHook::new(Reply::Fail));
 
-    let error = Operation::<(), ConversationEffect>::run(&operation, &(), &conversation, &emit)
-        .await
-        .err()
-        .unwrap();
+    let error = run(&operation, finished_turn()).await.err().unwrap();
 
     assert_eq!(error.to_string(), "stop hook crashed");
 }

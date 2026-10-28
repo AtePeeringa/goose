@@ -21,7 +21,7 @@ pub enum StopHookDecision {
     },
 }
 
-pub const DENIED: &str = "denied";
+const DENIED: &str = "denied";
 pub const DEFAULT_DENY_LIMIT: u32 = 8;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

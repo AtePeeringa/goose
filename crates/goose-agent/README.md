@@ -103,6 +103,11 @@ Good to know:
   permission)`. It is hidden, so it isn't mistaken for a new user message.
 - Calls with arguments that can't be read skip the hook; the tool step responds
   to them with the error.
+- If you write your own step that runs tools, run only calls that have no
+  response yet and where `request_executable(request)` isn't `Some(false)`.
+  `Some(false)` means the user was asked and hasn't allowed the call: it is
+  still waiting, or the user declined it and it already has its error result.
+  `ToolOperation` already does this.
 - `PreToolExecutionOperation` takes one hook. To run several, write one hook
   that calls the others.
 

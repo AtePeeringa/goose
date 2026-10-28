@@ -450,20 +450,7 @@ async fn pre_tool_use_reports_the_leased_working_dir_after_a_mid_run_change() ->
     agent
         .update_goose_mode(GooseMode::Auto, &session_id)
         .await?;
-    let hook_dir = tempfile::tempdir()?;
-    let plugin_dir = hook_dir.path().join("test-plugin");
-    std::fs::create_dir_all(plugin_dir.join("hooks"))?;
-    std::fs::write(
-        plugin_dir.join("hooks/hooks.json"),
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"payload=$(cat); printf '%s\\n' \"$payload\" >> \"$PLUGIN_ROOT/hook.log\""}]}]}}"#,
-    )?;
-    agent.set_hook_manager_for_test(crate::hooks::HookManager::from_plugins_for_test(vec![
-        crate::plugins::discovery::DiscoveredPlugin {
-            name: "test-plugin".into(),
-            root: plugin_dir.clone(),
-            scope: crate::plugins::discovery::PluginScope::Project,
-        },
-    ]));
+    let (_hook_dir, hook_log) = install_hook_log(&mut agent, &["PreToolUse"], 0)?;
 
     let model_reply = api.on("add one").hold_call(ADD, value(1));
     api.on("result: 1").reply("the result is one");
@@ -503,8 +490,7 @@ async fn pre_tool_use_reports_the_leased_working_dir_after_a_mid_run_change() ->
         .contexts()
         .iter()
         .all(|context| context.working_dir.as_deref() == Some(temp_dir.path())));
-    let hook_log = std::fs::read_to_string(plugin_dir.join("hook.log"))?;
-    let working_dirs = hook_log
+    let working_dirs = std::fs::read_to_string(hook_log)?
         .lines()
         .map(|line| {
             serde_json::from_str::<serde_json::Value>(line)

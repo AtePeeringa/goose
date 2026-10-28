@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_awaiting_approval_is_left_to_the_post_step() -> Result<()> {
+    async fn a_call_awaiting_approval_is_left_to_the_unhandled_tool_calls_step() -> Result<()> {
         let messages = vec![
             Message::user().with_text("run it"),
             Message::assistant().with_tool_request_with_metadata(

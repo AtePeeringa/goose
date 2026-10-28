@@ -349,7 +349,7 @@ impl Operation<Session, GooseEffect> for SkillOperation {
                 }
                 ToolDisposition::Execute => {
                     let Some(session) = leased_session.as_ref() else {
-                            response.add_tool_response_with_metadata(
+                        response.add_tool_response_with_metadata(
                             request.id,
                             Ok(CallToolResult::error(vec![ContentBlock::text(
                                 EXPIRED_APPROVAL_RESPONSE,

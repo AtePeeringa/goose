@@ -225,42 +225,38 @@ fn tool_response(id: &str) -> Message {
 }
 
 #[tokio::test]
-async fn allow_marks_the_call_true() {
+async fn allow_marks_the_call_true() -> Result<()> {
     let hook = FakeHook::new(&[("a", Reply::Allow)]);
     let operation = PreToolExecutionOperation::new(hook.clone());
 
-    let outcome = run(&operation, vec![kickoff(), calls(&["a"])])
-        .await
-        .unwrap();
+    let outcome = run(&operation, vec![kickoff(), calls(&["a"])]).await?;
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
     assert_eq!(outcome.marks, vec![("a".to_string(), true)]);
     assert!(outcome.appended.is_empty());
     assert_eq!(hook.checked(), vec!["a"]);
+    Ok(())
 }
 
 #[tokio::test]
-async fn deny_streams_an_error_response_with_the_reason_and_leaves_no_mark() {
+async fn deny_streams_an_error_response_with_the_reason_and_leaves_no_mark() -> Result<()> {
     let operation = PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Deny("no"))]));
 
-    let outcome = run(&operation, vec![kickoff(), calls(&["a"])])
-        .await
-        .unwrap();
+    let outcome = run(&operation, vec![kickoff(), calls(&["a"])]).await?;
 
     let expected = vec![("a".to_string(), "no".to_string())];
     assert!(outcome.marks.is_empty());
     assert_eq!(outcome.responses(), expected);
     assert_eq!(outcome.shown_responses(), expected);
+    Ok(())
 }
 
 #[tokio::test]
-async fn ask_marks_false_and_saves_a_confirmation_request_without_streaming_it() {
+async fn ask_marks_false_and_saves_a_confirmation_request_without_streaming_it() -> Result<()> {
     let operation =
         PreToolExecutionOperation::new(FakeHook::new(&[("a", Reply::Ask(Some("careful")))]));
 
-    let outcome = run(&operation, vec![kickoff(), calls(&["a"])])
-        .await
-        .unwrap();
+    let outcome = run(&operation, vec![kickoff(), calls(&["a"])]).await?;
 
     assert_eq!(outcome.marks, vec![("a".to_string(), false)]);
     let confirmation_requests = outcome.confirmation_requests();
@@ -278,10 +274,11 @@ async fn ask_marks_false_and_saves_a_confirmation_request_without_streaming_it()
     assert!(confirmation_requests[0].id.is_some());
     assert!(outcome.responses().is_empty());
     assert!(outcome.shown.is_empty());
+    Ok(())
 }
 
 #[tokio::test]
-async fn handles_a_mixed_batch_in_one_pass() {
+async fn handles_a_mixed_batch_in_one_pass() -> Result<()> {
     let hook = FakeHook::new(&[
         ("a", Reply::Allow),
         ("b", Reply::Deny("no")),
@@ -289,9 +286,7 @@ async fn handles_a_mixed_batch_in_one_pass() {
     ]);
     let operation = PreToolExecutionOperation::new(hook.clone());
 
-    let outcome = run(&operation, vec![kickoff(), calls(&["a", "b", "c"])])
-        .await
-        .unwrap();
+    let outcome = run(&operation, vec![kickoff(), calls(&["a", "b", "c"])]).await?;
 
     assert_eq!(outcome.status, Some(RunStatus::Continuing));
     assert_eq!(
@@ -304,10 +299,11 @@ async fn handles_a_mixed_batch_in_one_pass() {
     );
     assert_eq!(outcome.confirmation_requests().len(), 1);
     assert_eq!(hook.checked(), vec!["a", "b", "c"]);
+    Ok(())
 }
 
 #[tokio::test]
-async fn never_pauses_while_a_call_is_waiting() {
+async fn never_pauses_while_a_call_is_waiting() -> Result<()> {
     let hook = FakeHook::new(&[]);
     let operation = PreToolExecutionOperation::new(hook.clone());
 
@@ -319,17 +315,21 @@ async fn never_pauses_while_a_call_is_waiting() {
             confirmation_request("c"),
         ],
     )
-    .await
-    .unwrap();
+    .await?;
 
     assert!(outcome.status.is_none());
     assert!(hook.checked().is_empty());
+    Ok(())
 }
 
 #[tokio::test]
-async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() {
+async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() -> Result<()> {
     let hook = FakeHook::new(&[]);
     let operation = PreToolExecutionOperation::new(hook.clone());
+    let choice = click("c", Permission::AlwaysAllow);
+    assert!(!choice.is_user_visible());
+    assert!(!choice.is_agent_visible());
+    assert!(choice.id.is_some());
 
     let outcome = run(
         &operation,
@@ -337,11 +337,10 @@ async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() {
             kickoff(),
             marked_call("c", false),
             confirmation_request("c"),
-            click("c", Permission::AlwaysAllow),
+            choice,
         ],
     )
-    .await
-    .unwrap();
+    .await?;
 
     assert_eq!(outcome.marks, vec![("c".to_string(), true)]);
     assert_eq!(
@@ -359,15 +358,15 @@ async fn a_user_allow_tells_the_hook_once_and_marks_the_call_true() {
             click("c", Permission::AlwaysAllow),
         ],
     )
-    .await
-    .unwrap();
+    .await?;
 
     assert!(outcome.status.is_none());
     assert_eq!(hook.told().len(), 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn a_user_deny_responds_with_the_declined_message() {
+async fn a_user_deny_responds_with_the_declined_message() -> Result<()> {
     let conversation = || {
         vec![
             kickoff(),
@@ -382,8 +381,7 @@ async fn a_user_deny_responds_with_the_declined_message() {
         &PreToolExecutionOperation::new(hook.clone()),
         conversation(),
     )
-    .await
-    .unwrap();
+    .await?;
     assert!(outcome.marks.is_empty());
     assert_eq!(
         outcome.responses(),
@@ -392,15 +390,16 @@ async fn a_user_deny_responds_with_the_declined_message() {
     assert_eq!(hook.told(), vec![("c".to_string(), Permission::DenyOnce)]);
 
     let custom = PreToolExecutionOperation::new(FakeHook::new(&[])).with_declined_message("nope");
-    let outcome = run(&custom, conversation()).await.unwrap();
+    let outcome = run(&custom, conversation()).await?;
     assert_eq!(
         outcome.responses(),
         vec![("c".to_string(), "nope".to_string())]
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn skips_unreadable_external_and_responded_calls() {
+async fn skips_unreadable_external_and_responded_calls() -> Result<()> {
     let hook = FakeHook::new(&[]);
     let operation = PreToolExecutionOperation::new(hook.clone());
 
@@ -423,11 +422,11 @@ async fn skips_unreadable_external_and_responded_calls() {
             tool_response("done"),
         ],
     )
-    .await
-    .unwrap();
+    .await?;
 
     assert!(outcome.status.is_none());
     assert!(hook.checked().is_empty());
+    Ok(())
 }
 
 #[tokio::test]
@@ -440,13 +439,4 @@ async fn a_hook_error_ends_the_run() {
         .unwrap();
 
     assert_eq!(error.to_string(), "hook crashed");
-}
-
-#[test]
-fn the_confirmation_response_message_has_an_id_and_is_hidden_from_the_user_and_the_model() {
-    let message = confirmation_response_message("c", Permission::AllowOnce);
-
-    assert!(!message.is_user_visible());
-    assert!(!message.is_agent_visible());
-    assert!(message.id.is_some());
 }

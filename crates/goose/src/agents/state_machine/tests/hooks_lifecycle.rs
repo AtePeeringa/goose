@@ -10,7 +10,6 @@ use crate::agents::tool_execution::{CHAT_MODE_TOOL_SKIPPED_RESPONSE, DECLINED_RE
 use crate::config::permission::PermissionLevel;
 use crate::config::GooseMode;
 use crate::conversation::message::{Message, MessageContent, SystemNotificationType};
-use goose_agent::stop_hook::DENIED;
 
 struct HookTestEnv {
     _temp_dir: tempfile::TempDir,
@@ -126,7 +125,7 @@ async fn stop_hooks_allow_block_and_skip_non_stop_exits() -> Result<()> {
             .iter()
             .filter(|message| message
                 .metadata
-                .operation_note("stop_hook", DENIED)
+                .operation_note("stop_hook", "denied")
                 .is_some())
             .count(),
         2
@@ -263,7 +262,7 @@ async fn stop_hook_distinct_id_denials_retry_once_then_respect_block_cap() -> Re
             .iter()
             .filter(|message| message
                 .metadata
-                .operation_note("stop_hook", DENIED)
+                .operation_note("stop_hook", "denied")
                 .is_some())
             .count(),
         1

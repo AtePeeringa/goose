@@ -1,7 +1,7 @@
 use goose_agent::{
     operation::{ConversationEffect, Emitter, Operation, OperationResult, RunStatus},
     pre_tool_execution::EXECUTABLE_KEY,
-    unhandled_tool_calls::{UnhandledToolCallsOperation, NOT_HANDLED_MESSAGE},
+    unhandled_tool_calls::UnhandledToolCallsOperation,
 };
 use goose_provider_types::conversation::{
     message::{Message, MessageContent, TOOL_META_EXTERNAL_DISPATCH_KEY},
@@ -93,7 +93,10 @@ fn tool_responses(ids: &[&str]) -> Message {
 }
 
 fn not_handled(id: &str) -> (String, String) {
-    (id.to_string(), NOT_HANDLED_MESSAGE.to_string())
+    (
+        id.to_string(),
+        "This tool call was not handled.".to_string(),
+    )
 }
 
 #[tokio::test]
