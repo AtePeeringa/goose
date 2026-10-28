@@ -139,7 +139,7 @@ async fn builtin_commands_win_over_skills_and_recipes() -> Result<()> {
 
 #[cfg(feature = "code-mode")]
 #[tokio::test]
-async fn unadvertised_load_skill_is_neither_approved_nor_loaded() -> Result<()> {
+async fn unadvertised_load_skill_is_not_confirmed_or_loaded() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
     let skill_dir = pipeline.working_dir().join(".agents/skills/private");
     std::fs::create_dir_all(&skill_dir)?;

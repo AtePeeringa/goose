@@ -394,6 +394,82 @@ async fn a_user_allow_tells_the_approval_once_and_marks_the_call_approved() -> R
 }
 
 #[tokio::test]
+async fn handles_one_user_answer_per_pass() -> Result<()> {
+    let approval = FakeApproval::new(&[]);
+    let operation = ToolApprovalOperation::new(approval.clone());
+
+    let outcome = run(
+        &operation,
+        vec![
+            kickoff(),
+            marked_call("a", false),
+            marked_call("b", false),
+            confirmation_request("a"),
+            confirmation_request("b"),
+            click("a", Permission::AllowOnce),
+            click("b", Permission::DenyOnce),
+        ],
+    )
+    .await?;
+
+    assert_eq!(outcome.marks, vec![approved("a")]);
+    assert!(outcome.responses().is_empty());
+    assert_eq!(
+        approval.told(),
+        vec![("a".to_string(), Permission::AllowOnce)]
+    );
+
+    let outcome = run(
+        &operation,
+        vec![
+            kickoff(),
+            approved_call("a"),
+            marked_call("b", false),
+            confirmation_request("a"),
+            confirmation_request("b"),
+            click("a", Permission::AllowOnce),
+            click("b", Permission::DenyOnce),
+        ],
+    )
+    .await?;
+
+    assert!(outcome.marks.is_empty());
+    assert_eq!(
+        outcome.responses(),
+        vec![("b".to_string(), DEFAULT_DECLINED_MESSAGE.to_string())]
+    );
+    assert_eq!(
+        approval.told(),
+        vec![
+            ("a".to_string(), Permission::AllowOnce),
+            ("b".to_string(), Permission::DenyOnce)
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn applies_a_user_answer_before_checking_new_calls() -> Result<()> {
+    let approval = FakeApproval::new(&[]);
+
+    let outcome = run(
+        &ToolApprovalOperation::new(approval.clone()),
+        vec![
+            kickoff(),
+            marked_call("answered", false),
+            confirmation_request("answered"),
+            click("answered", Permission::AllowOnce),
+            calls(&["new"]),
+        ],
+    )
+    .await?;
+
+    assert_eq!(outcome.marks, vec![approved("answered")]);
+    assert!(approval.checked().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_user_deny_responds_with_the_declined_message() -> Result<()> {
     let conversation = || {
         vec![
