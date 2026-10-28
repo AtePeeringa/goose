@@ -1,5 +1,4 @@
 pub mod events;
-pub mod hook;
 pub mod inference;
 pub mod machine;
 pub mod operation;

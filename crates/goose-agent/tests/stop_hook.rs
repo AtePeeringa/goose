@@ -7,9 +7,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use goose_agent::{
     events::AgentEvent,
-    hook::HookDecision,
     operation::{ConversationEffect, Emitter, Operation, OperationResult, RunStatus},
-    stop_hook::{StopHook, StopHookOperation, DENIED},
+    stop_hook::{StopHook, StopHookDecision, StopHookOperation, DENIED},
 };
 use goose_provider_types::conversation::{
     message::{Message, MessageContent, SystemNotificationType},
@@ -42,12 +41,16 @@ impl FakeHook {
 
 #[async_trait]
 impl StopHook<()> for FakeHook {
-    async fn on_stop(&self, _session: &(), _conversation: &Conversation) -> Result<HookDecision> {
+    async fn on_stop(
+        &self,
+        _session: &(),
+        _conversation: &Conversation,
+    ) -> Result<StopHookDecision> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let Some(reason) = self.deny_with else {
-            return Ok(HookDecision::Allow);
+            return Ok(StopHookDecision::Allow);
         };
-        Ok(HookDecision::Deny {
+        Ok(StopHookDecision::Deny {
             reason: reason.to_string(),
             user_message: Some(notice("hook denied")),
         })
@@ -58,7 +61,11 @@ struct FailingHook;
 
 #[async_trait]
 impl StopHook<()> for FailingHook {
-    async fn on_stop(&self, _session: &(), _conversation: &Conversation) -> Result<HookDecision> {
+    async fn on_stop(
+        &self,
+        _session: &(),
+        _conversation: &Conversation,
+    ) -> Result<StopHookDecision> {
         anyhow::bail!("stop hook crashed")
     }
 }

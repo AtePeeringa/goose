@@ -1,12 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use goose_agent::hook::HookDecision;
-use goose_agent::stop_hook::StopHook;
+use goose_agent::stop_hook::{StopHook, StopHookDecision};
 use rmcp::model::Role;
 
 use crate::conversation::message::{Message, SystemNotificationType};
 use crate::conversation::Conversation;
-use crate::hooks::{HookContext, HookEvent, HookManager, PluginHookDecision};
+use crate::hooks::{HookContext, HookDecision, HookEvent, HookManager};
 use crate::session::Session;
 
 fn denial_reason(plugin: &str, reason: &str) -> String {
@@ -64,7 +63,7 @@ impl StopHook<Session> for GooseStopHook {
         &self,
         session: &Session,
         conversation: &Conversation,
-    ) -> Result<HookDecision> {
+    ) -> Result<StopHookDecision> {
         let context = HookContext::new(HookEvent::Stop, &session.id)
             .with_last_assistant_message(Self::trailing_assistant_text(conversation.messages()))
             .with_working_dir(session.working_dir.to_string_lossy().into_owned());
@@ -73,8 +72,8 @@ impl StopHook<Session> for GooseStopHook {
             .emit_blocking(HookEvent::Stop, context)
             .await
         {
-            PluginHookDecision::Allow => Ok(HookDecision::Allow),
-            PluginHookDecision::Deny { reason, plugin } => Ok(HookDecision::Deny {
+            HookDecision::Allow => Ok(StopHookDecision::Allow),
+            HookDecision::Deny { reason, plugin } => Ok(StopHookDecision::Deny {
                 reason: denial_reason(&plugin, &reason),
                 user_message: Some(denial_user_message(&plugin)),
             }),

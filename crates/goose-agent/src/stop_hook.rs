@@ -6,11 +6,20 @@ use goose_provider_types::conversation::message::Message;
 use goose_provider_types::conversation::Conversation;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 
-use crate::hook::HookDecision;
 use crate::operation::{
     applied, ends_turn, messages_since_kickoff, not_applicable, yielded, yielded_with, Emitter,
     Operation, OperationResult,
 };
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum StopHookDecision {
+    Allow,
+    Deny {
+        reason: String,
+        user_message: Option<Message>,
+    },
+}
 
 pub const DENIED: &str = "denied";
 pub const DEFAULT_DENY_LIMIT: u32 = 8;
@@ -18,7 +27,7 @@ pub const DEFAULT_DENY_LIMIT: u32 = 8;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait StopHook<S>: MaybeSend + MaybeSync {
-    async fn on_stop(&self, session: &S, conversation: &Conversation) -> Result<HookDecision>;
+    async fn on_stop(&self, session: &S, conversation: &Conversation) -> Result<StopHookDecision>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -78,8 +87,8 @@ where
             return not_applicable();
         }
         let (reason, user_message) = match self.hook.on_stop(session, conversation).await? {
-            HookDecision::Allow => return yielded(),
-            HookDecision::Deny {
+            StopHookDecision::Allow => return yielded(),
+            StopHookDecision::Deny {
                 reason,
                 user_message,
             } => (reason, user_message),
