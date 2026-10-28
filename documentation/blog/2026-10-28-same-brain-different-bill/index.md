@@ -9,7 +9,7 @@ tags: [gdk]
 
 Coding benchmarks are mostly about which frontier model solves the most tasks.
 Now that [tokens are no longer free](https://douwe.com/blog/2026/0518/), what it costs to solve them matters just as much.
-Between the model and the bill sits the harness, which builds every request and decides how often to call the model and how much context to send.
+Between the model and the bill sits the harness, which decides what goes into each request and how many requests a task takes.
 
 To see how much that layer matters, we gave five open harnesses (goose, Codex CLI, OpenCode, Hermes Agent and pi) the same model, gpt-6.1-sol at high reasoning effort, and the same Terminal-Bench 4 tasks.
 Each harness attempted every task five times, for 310 scored trials per harness.
