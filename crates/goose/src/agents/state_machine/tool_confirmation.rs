@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
+use goose_agent::pre_tool_execution::confirmation_response_message;
 
 use crate::agents::state_machine::messages_since_kickoff;
 use crate::agents::state_machine::ops_toolcalling::request_was_advertised;
@@ -177,13 +178,10 @@ pub(crate) async fn persist_tool_confirmation_decision(
         return Err(anyhow!("Tool request {request_id} already has a response"));
     }
 
-    let response_message = Message::user().with_visibility(false, false).with_content(
-        MessageContent::action_required_tool_confirmation_response(
-            request_id.to_string(),
-            permission.clone(),
-        ),
-    );
     session_manager
-        .add_message(session_id, &response_message)
+        .add_message(
+            session_id,
+            &confirmation_response_message(request_id, permission.clone()),
+        )
         .await
 }

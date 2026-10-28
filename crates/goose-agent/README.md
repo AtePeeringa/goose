@@ -106,14 +106,17 @@ Good to know:
 - `PreToolExecutionOperation` takes one hook. To run several, write one hook
   that calls the others.
 
-A post-tool hook sees each tool call's result after it is saved. It can't change
-the result. To add one, implement `PostToolCallHook<S>` and give it to
-`PostToolExecutionOperation::new().with_hook(..)`. Its `after_call` is called
-once per result, only for calls that ran. An error ends the run.
+A post-tool hook sees each tool call's result right after the call. It can't
+change the result. To add one, implement `PostToolCallHook<S>` and give it to the
+step that runs the tools: `ToolOperation::new().with_post_tool_call_hook(..)`.
+Its `after_call` is called once per call that ran, right after that call and
+before the next one starts. `ToolOperation` logs an error and the run goes on, so
+the result is still saved. If you write your own step that runs tools, call
+`after_call` after each call yourself and decide what an error means; otherwise
+its calls get no post-tool hook.
 
-`PostToolExecutionOperation` is needed with `PreToolExecutionOperation` even
-without a post-tool hook. Put it after every step that runs tools, right before
-inference. It gives calls no step handled a "not handled" error result, and it
+`PostToolExecutionOperation` is needed with `PreToolExecutionOperation`. Put it
+after every step that runs tools, right before inference. It gives calls no step handled a "not handled" error result, and it
 pauses the run while calls wait for the user, so the model isn't called with
 calls still open. A step that runs tools after it gets "not handled" for its
 calls.

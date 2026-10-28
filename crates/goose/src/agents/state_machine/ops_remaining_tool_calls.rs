@@ -1,22 +1,26 @@
 //! Answers tool requests that no other operation handled.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
+use goose_agent::post_tool_call_hook::PostToolCallHook;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorCode, ErrorData};
 use tracing_futures::Instrument;
 
 use crate::agents::final_output_tool::FINAL_OUTPUT_TOOL_NAME;
 use crate::agents::state_machine::effects::GooseEffect;
 use crate::agents::state_machine::ops_toolcalling::{
-    answered_without_running, emit_extended_pre_hooks, pending_tool_requests,
-    request_was_advertised, tool_span, ToolDisposition,
+    emit_extended_pre_hooks, pending_tool_requests, request_was_advertised, tool_span,
+    ToolDisposition,
 };
+use crate::agents::state_machine::post_tool_hook::run_post_tool_call_hook;
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, Emitter, Operation, OperationResult,
 };
 use crate::agents::tool_execution::CHAT_MODE_TOOL_SKIPPED_RESPONSE;
 use crate::config::GooseMode;
-use crate::conversation::message::Message;
+use crate::conversation::message::{Message, ToolResponse};
 use crate::conversation::Conversation;
 use crate::hooks::HookManager;
 use crate::session::Session;
@@ -25,11 +29,18 @@ pub(super) const UNCLAIMED_TOOL_ERROR: &str = "goose.unclaimed_tool";
 
 pub struct RemainingToolCallsOperation {
     hook_manager: HookManager,
+    post_tool_call_hook: Arc<dyn PostToolCallHook<Session>>,
 }
 
 impl RemainingToolCallsOperation {
-    pub fn new(hook_manager: HookManager) -> Self {
-        Self { hook_manager }
+    pub fn new(
+        hook_manager: HookManager,
+        post_tool_call_hook: Arc<dyn PostToolCallHook<Session>>,
+    ) -> Self {
+        Self {
+            hook_manager,
+            post_tool_call_hook,
+        }
     }
 }
 
@@ -111,7 +122,9 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
                             )
                             .instrument(span.clone())
                             .await;
-                            if tool_call.name == FINAL_OUTPUT_TOOL_NAME && !active_final_output {
+                            let (output, unclaimed) = if tool_call.name == FINAL_OUTPUT_TOOL_NAME
+                                && !active_final_output
+                            {
                                 span.record("error.type", "final_output_not_defined");
                                 (
                                     Err(ErrorData::new(
@@ -130,7 +143,22 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
                                     ))])),
                                     true,
                                 )
-                            }
+                            };
+                            let tool_response = ToolResponse {
+                                id: request.id.clone(),
+                                tool_result: output.clone(),
+                                metadata: request.metadata.clone(),
+                            };
+                            run_post_tool_call_hook(
+                                self.post_tool_call_hook.as_ref(),
+                                session,
+                                conversation,
+                                &request,
+                                &tool_response,
+                            )
+                            .instrument(span.clone())
+                            .await;
+                            (output, unclaimed)
                         }
                         Err(error) => (
                             Ok(CallToolResult::error(vec![ContentBlock::text(format!(
@@ -150,28 +178,91 @@ impl Operation<Session, GooseEffect> for RemainingToolCallsOperation {
             response.add_tool_response_with_metadata(request.id, result, metadata.as_ref());
         }
 
-        applied(answered_without_running(response, emit))
+        let response = emit.message(response);
+        applied([response.into()])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation::message::ToolRequest;
     use crate::recipe::{Recipe, Response};
     use goose_agent::pre_tool_execution::EXECUTABLE_KEY;
     use rmcp::model::CallToolRequestParams;
+    use std::sync::Mutex;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
+
+    #[derive(Default)]
+    struct RecordingHook(Mutex<Vec<(String, bool)>>);
+
+    #[async_trait]
+    impl PostToolCallHook<Session> for RecordingHook {
+        async fn after_call(
+            &self,
+            _session: &Session,
+            _conversation: &Conversation,
+            request: &ToolRequest,
+            response: &ToolResponse,
+        ) -> Result<()> {
+            let failed = response
+                .tool_result
+                .as_ref()
+                .map_or(true, |result| result.is_error == Some(true));
+            self.0.lock().unwrap().push((request.id.clone(), failed));
+            Ok(())
+        }
+    }
+
+    async fn run_with_hook(
+        session: &Session,
+        messages: Vec<Message>,
+        hook: Arc<RecordingHook>,
+    ) -> Result<OperationResult<GooseEffect>> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let emit = Emitter::new(tx, CancellationToken::new());
+        RemainingToolCallsOperation::new(HookManager::default(), hook)
+            .run(session, &Conversation::new_unvalidated(messages), &emit)
+            .await
+    }
 
     async fn run(
         session: &Session,
         messages: Vec<Message>,
     ) -> Result<OperationResult<GooseEffect>> {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let emit = Emitter::new(tx, CancellationToken::new());
-        RemainingToolCallsOperation::new(HookManager::default())
-            .run(session, &Conversation::new_unvalidated(messages), &emit)
-            .await
+        run_with_hook(session, messages, Arc::default()).await
+    }
+
+    #[tokio::test]
+    async fn offered_calls_no_runner_ran_get_a_failed_post_hook() -> Result<()> {
+        let messages = || {
+            vec![
+                Message::user().with_text("go"),
+                Message::assistant()
+                    .with_tool_request("missing", Ok(CallToolRequestParams::new("missing_tool")))
+                    .with_tool_request(
+                        "final",
+                        Ok(CallToolRequestParams::new(FINAL_OUTPUT_TOOL_NAME)),
+                    ),
+            ]
+        };
+
+        let hook = Arc::new(RecordingHook::default());
+        run_with_hook(&Session::default(), messages(), hook.clone()).await?;
+        assert_eq!(
+            *hook.0.lock().unwrap(),
+            [("missing".to_string(), true), ("final".to_string(), true)]
+        );
+
+        let chat = Session {
+            goose_mode: GooseMode::Chat,
+            ..Session::default()
+        };
+        let hook = Arc::new(RecordingHook::default());
+        run_with_hook(&chat, messages(), hook.clone()).await?;
+        assert!(hook.0.lock().unwrap().is_empty());
+        Ok(())
     }
 
     #[tokio::test]

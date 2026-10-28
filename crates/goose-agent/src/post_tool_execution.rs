@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
-use goose_provider_types::conversation::message::{Message, ToolRequest, ToolResponse};
+use goose_provider_types::conversation::message::{Message, ToolRequest};
 use goose_provider_types::conversation::Conversation;
 use goose_provider_types::maybe_send::{MaybeSend, MaybeSync};
 
@@ -10,76 +8,22 @@ use crate::operation::{
     applied, messages_since_kickoff, not_applicable, yielded, ConversationEffect, Emitter,
     Operation, OperationResult,
 };
-use crate::tool_call_state::{
-    add_error_response, mark_executable, request_executable, tool_calls, tool_meta_value,
-    ToolCallState,
-};
+use crate::tool_call_state::{add_error_response, mark_executable, tool_calls, ToolCallState};
 
-pub const POST_HOOK_CALLED_KEY: &str = "goose.post_hook_called";
 pub const NOT_HANDLED_MESSAGE: &str = "This tool call was not handled.";
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait PostToolCallHook<S>: MaybeSend + MaybeSync {
-    async fn after_call(
-        &self,
-        session: &S,
-        conversation: &Conversation,
-        request: &ToolRequest,
-        response: &ToolResponse,
-    ) -> Result<()>;
-}
+pub struct PostToolExecutionOperation;
 
-pub struct PostToolExecutionOperation<'a, S> {
-    hook: Option<Arc<dyn PostToolCallHook<S> + 'a>>,
-}
-
-impl<'a, S> PostToolExecutionOperation<'a, S> {
+impl PostToolExecutionOperation {
     pub fn new() -> Self {
-        Self { hook: None }
-    }
-
-    pub fn with_hook(mut self, hook: Arc<dyn PostToolCallHook<S> + 'a>) -> Self {
-        self.hook = Some(hook);
-        self
+        Self
     }
 }
 
-impl<S> Default for PostToolExecutionOperation<'_, S> {
+impl Default for PostToolExecutionOperation {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn needs_post_hook(request: &ToolRequest) -> bool {
-    !request.was_executed_externally()
-        && request.tool_call.is_ok()
-        && request_executable(request) != Some(false)
-        && tool_meta_value(request, POST_HOOK_CALLED_KEY) != Some(true)
-}
-
-async fn call_post_hooks<S>(
-    hook: &dyn PostToolCallHook<S>,
-    session: &S,
-    conversation: &Conversation,
-    calls: &[(&ToolRequest, ToolCallState<'_>)],
-) -> Result<Vec<ConversationEffect>> {
-    let mut effects = Vec::new();
-    for (request, state) in calls {
-        let ToolCallState::Responded(response) = state else {
-            continue;
-        };
-        if !needs_post_hook(request) {
-            continue;
-        }
-        hook.after_call(session, conversation, request, response)
-            .await?;
-        effects.push(ConversationEffect::PatchToolRequestMeta {
-            tool_call_id: request.id.clone(),
-            patch: serde_json::json!({ POST_HOOK_CALLED_KEY: true }),
-        });
-    }
-    Ok(effects)
 }
 
 fn respond_to_unhandled_calls(
@@ -104,7 +48,7 @@ fn respond_to_unhandled_calls(
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S, E> Operation<S, E> for PostToolExecutionOperation<'_, S>
+impl<S, E> Operation<S, E> for PostToolExecutionOperation
 where
     S: MaybeSend + MaybeSync + 'static,
     E: From<ConversationEffect> + MaybeSend + 'static,
@@ -115,19 +59,11 @@ where
 
     async fn run(
         &self,
-        session: &S,
+        _session: &S,
         conversation: &Conversation,
         emit: &Emitter,
     ) -> Result<OperationResult<E>> {
-        let calls = tool_calls(messages_since_kickoff(conversation)?);
-        if let Some(hook) = &self.hook {
-            let effects = call_post_hooks(hook.as_ref(), session, conversation, &calls).await?;
-            if !effects.is_empty() {
-                return applied(effects.into_iter().map(E::from));
-            }
-        }
-
-        let open_calls: Vec<_> = calls
+        let open_calls: Vec<_> = tool_calls(messages_since_kickoff(conversation)?)
             .into_iter()
             .filter(|(request, state)| state.is_open() && !request.was_executed_externally())
             .collect();

@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -14,11 +14,12 @@ use goose_agent::{
         ConversationEffect, Emitter, Inference, InferenceInput, Operation, OperationResult,
         RunStatus,
     },
+    post_tool_call_hook::PostToolCallHook,
     pre_tool_execution::EXECUTABLE_KEY,
     tool::{ToolOperation, ToolProvider},
 };
 use goose_provider_types::conversation::{
-    message::{Message, MessageContent},
+    message::{Message, MessageContent, ToolRequest, ToolResponse},
     Conversation,
 };
 use rmcp::{
@@ -540,4 +541,123 @@ async fn skips_calls_marked_not_to_run() {
     ));
     let tool_responses = appended_message(run(call(true)).await);
     assert!(tool_responses.get_tool_response_ids().contains("add-call"));
+}
+
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<String>>>);
+
+impl Log {
+    fn push(&self, entry: String) {
+        self.0.lock().unwrap().push(entry);
+    }
+
+    fn entries(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+struct LoggingTools(Log);
+
+#[async_trait]
+impl ToolProvider<()> for LoggingTools {
+    async fn tools(&self, _session: &()) -> Result<Vec<Tool>> {
+        Ok(vec![Tool::new(
+            "logged",
+            "A tool that logs its calls",
+            Arc::new(serde_json::Map::new()),
+        )])
+    }
+
+    async fn call(
+        &self,
+        _session: &(),
+        request_id: &str,
+        _call: CallToolRequestParams,
+        _emit: &Emitter,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.0.push(format!("call:{request_id}"));
+        Ok(CallToolResult::structured(json!({ "id": request_id })))
+    }
+}
+
+struct LoggingHook {
+    log: Log,
+    fail: bool,
+}
+
+#[async_trait]
+impl PostToolCallHook<()> for LoggingHook {
+    async fn after_call(
+        &self,
+        _session: &(),
+        _conversation: &Conversation,
+        request: &ToolRequest,
+        response: &ToolResponse,
+    ) -> Result<()> {
+        assert_eq!(request.id, response.id);
+        self.log.push(format!("hook:{}", request.id));
+        if self.fail {
+            anyhow::bail!("hook failed");
+        }
+        Ok(())
+    }
+}
+
+fn logged_calls() -> Conversation {
+    Conversation::new_unvalidated([
+        Message::user().with_text("call tools"),
+        Message::assistant()
+            .with_tool_request("first", Ok(CallToolRequestParams::new("logged")))
+            .with_tool_request(
+                "invalid",
+                Err(ErrorData::invalid_params("malformed arguments", None)),
+            )
+            .with_tool_request("second", Ok(CallToolRequestParams::new("logged"))),
+    ])
+}
+
+async fn run_logged_calls(fail: bool) -> (Log, Message) {
+    let log = Log::default();
+    let operation = ToolOperation::new()
+        .with_provider(Arc::new(LoggingTools(log.clone())))
+        .with_post_tool_call_hook(Arc::new(LoggingHook {
+            log: log.clone(),
+            fail,
+        }));
+    let message = appended_message(
+        <ToolOperation<()> as Operation<(), ConversationEffect>>::run(
+            &operation,
+            &(),
+            &logged_calls(),
+            &emitter(),
+        )
+        .await
+        .unwrap(),
+    );
+    (log, message)
+}
+
+#[tokio::test]
+async fn calls_the_post_tool_call_hook_right_after_each_call_that_ran() {
+    let (log, tool_responses) = run_logged_calls(false).await;
+
+    assert_eq!(
+        log.entries(),
+        ["call:first", "hook:first", "call:second", "hook:second"]
+    );
+    assert_eq!(tool_responses.content.len(), 3);
+}
+
+#[tokio::test]
+async fn a_failing_post_tool_call_hook_keeps_the_results() {
+    let (log, tool_responses) = run_logged_calls(true).await;
+
+    assert_eq!(
+        log.entries(),
+        ["call:first", "hook:first", "call:second", "hook:second"]
+    );
+    let ids = tool_responses.get_tool_response_ids();
+    assert!(["first", "invalid", "second"]
+        .iter()
+        .all(|id| ids.contains(id)));
 }

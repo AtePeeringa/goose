@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use goose_agent::post_tool_call_hook::PostToolCallHook;
 use goose_providers::model::ModelConfig;
 use tokio_util::sync::CancellationToken;
 
@@ -72,29 +73,37 @@ pub(crate) fn build_state_machine(
     } = config;
     let manages_own_context = provider.manages_own_context();
 
+    let post_tool_call_hook: Arc<dyn PostToolCallHook<Session>> =
+        Arc::new(GoosePostToolHook::new(hook_manager.clone()));
     let mut operations: Vec<Arc<dyn Operation<Session, GooseEffect> + '_>> = vec![
         Arc::new(
             PreToolExecutionOperation::new(Arc::new(GoosePreToolHook::new(
                 hook_manager.clone(),
                 tool_inspection_manager,
+                Arc::clone(&extension_lease),
             )))
             .with_declined_message(DECLINED_RESPONSE),
         ),
-        Arc::new(SkillOperation::new(Arc::clone(&extension_lease))),
+        Arc::new(SkillOperation::new(
+            Arc::clone(&extension_lease),
+            Arc::clone(&post_tool_call_hook),
+        )),
         Arc::new(RecipeOperation::new(
             provider.clone(),
             Arc::clone(&extension_manager),
+            Arc::clone(&post_tool_call_hook),
         )),
         Arc::new(ToolExecutionOperation::new(
             Arc::clone(&extension_manager),
             hook_manager.clone(),
+            Arc::clone(&post_tool_call_hook),
             Arc::clone(&extension_lease),
         )),
-        Arc::new(RemainingToolCallsOperation::new(hook_manager.clone())),
-        Arc::new(
-            PostToolExecutionOperation::new()
-                .with_hook(Arc::new(GoosePostToolHook::new(hook_manager.clone()))),
-        ),
+        Arc::new(RemainingToolCallsOperation::new(
+            hook_manager.clone(),
+            post_tool_call_hook,
+        )),
+        Arc::new(PostToolExecutionOperation::new()),
         Arc::new(
             SubagentOperation::new(Arc::new(subagent_runner)).with_max_concurrency(
                 Config::global()

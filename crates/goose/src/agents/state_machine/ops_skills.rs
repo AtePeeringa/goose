@@ -5,24 +5,26 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use goose_agent::pre_tool_execution::mark_executable;
+use goose_agent::post_tool_call_hook::PostToolCallHook;
 use goose_sdk_types::custom_requests::{SourceEntry, SourceType};
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData, JsonObject, Tool};
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
+use tracing_futures::Instrument;
 
 use crate::agents::extension_manager::ExtensionLease;
 use crate::agents::state_machine::ops_toolcalling::{
     pending_advertised_tool_requests, tool_span, ToolDisposition, EXPIRED_APPROVAL_RESPONSE,
 };
+use crate::agents::state_machine::post_tool_hook::run_post_tool_call_hook;
 use crate::agents::state_machine::{
     applied, messages_since_kickoff, not_applicable, yielded_with, ConversationEffect, Emitter,
     GooseEffect, Operation, OperationResult, SlashCommand,
 };
 use crate::agents::tool_execution::CHAT_MODE_TOOL_SKIPPED_RESPONSE;
 use crate::config::GooseMode;
-use crate::conversation::message::Message;
+use crate::conversation::message::{Message, ToolResponse};
 use crate::conversation::Conversation;
 use crate::session::Session;
 
@@ -30,6 +32,7 @@ const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 
 pub struct SkillOperation {
     extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
+    post_tool_call_hook: Arc<dyn PostToolCallHook<Session>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -192,8 +195,14 @@ fn load_supporting_file(
 }
 
 impl SkillOperation {
-    pub fn new(extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>) -> Self {
-        Self { extension_lease }
+    pub fn new(
+        extension_lease: Arc<StdMutex<Option<Arc<ExtensionLease>>>>,
+        post_tool_call_hook: Arc<dyn PostToolCallHook<Session>>,
+    ) -> Self {
+        Self {
+            extension_lease,
+            post_tool_call_hook,
+        }
     }
 
     fn leased_session(&self, session: &Session) -> Option<Session> {
@@ -331,19 +340,16 @@ impl Operation<Session, GooseEffect> for SkillOperation {
 
         let leased_session = self.leased_session(session);
         let mut response = Message::user();
-        let mut effects = Vec::new();
         for (request, disposition) in pending {
             let result: std::result::Result<CallToolResult, ErrorData> = match disposition {
                 ToolDisposition::Execute if session.goose_mode == GooseMode::Chat => {
-                    effects.push(mark_executable(&request.id, false).into());
                     Ok(CallToolResult::success(vec![ContentBlock::text(
                         CHAT_MODE_TOOL_SKIPPED_RESPONSE,
                     )]))
                 }
                 ToolDisposition::Execute => {
                     let Some(session) = leased_session.as_ref() else {
-                        effects.push(mark_executable(&request.id, false).into());
-                        response.add_tool_response_with_metadata(
+                            response.add_tool_response_with_metadata(
                             request.id,
                             Ok(CallToolResult::error(vec![ContentBlock::text(
                                 EXPIRED_APPROVAL_RESPONSE,
@@ -363,7 +369,21 @@ impl Operation<Session, GooseEffect> for SkillOperation {
                     if result.is_error == Some(true) {
                         span.record("error.type", "tool_error");
                     }
-                    Ok(result)
+                    let response = ToolResponse {
+                        id: request.id.clone(),
+                        tool_result: Ok(result),
+                        metadata: request.metadata.clone(),
+                    };
+                    run_post_tool_call_hook(
+                        self.post_tool_call_hook.as_ref(),
+                        session,
+                        conversation,
+                        &request,
+                        &response,
+                    )
+                    .instrument(span)
+                    .await;
+                    response.tool_result
                 }
                 ToolDisposition::ParseError(error) => {
                     Ok(CallToolResult::error(vec![ContentBlock::text(format!(
@@ -373,8 +393,8 @@ impl Operation<Session, GooseEffect> for SkillOperation {
             };
             response.add_tool_response_with_metadata(request.id, result, request.metadata.as_ref());
         }
-        effects.push(emit.message(response).into());
-        applied(effects)
+        let response = emit.message(response);
+        applied([response.into()])
     }
 }
 

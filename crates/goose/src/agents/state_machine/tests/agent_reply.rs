@@ -444,6 +444,77 @@ async fn stop_at_a_confirmation_interrupts_the_waiting_call() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_tool_use_reports_the_leased_working_dir_after_a_mid_run_change() -> Result<()> {
+    let (mut agent, api, session_id, calculator, temp_dir) = agent_with_calculator().await?;
+    agent
+        .update_goose_mode(GooseMode::Auto, &session_id)
+        .await?;
+    let hook_dir = tempfile::tempdir()?;
+    let plugin_dir = hook_dir.path().join("test-plugin");
+    std::fs::create_dir_all(plugin_dir.join("hooks"))?;
+    std::fs::write(
+        plugin_dir.join("hooks/hooks.json"),
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"payload=$(cat); printf '%s\\n' \"$payload\" >> \"$PLUGIN_ROOT/hook.log\""}]}]}}"#,
+    )?;
+    agent.set_hook_manager_for_test(crate::hooks::HookManager::from_plugins_for_test(vec![
+        crate::plugins::discovery::DiscoveredPlugin {
+            name: "test-plugin".into(),
+            root: plugin_dir.clone(),
+            scope: crate::plugins::discovery::PluginScope::Project,
+        },
+    ]));
+
+    let model_reply = api.on("add one").hold_call(ADD, value(1));
+    api.on("result: 1").reply("the result is one");
+
+    let session_config = SessionConfig {
+        id: session_id,
+        schedule_id: None,
+        max_turns: Some(2),
+    };
+    let stream = agent
+        .reply(
+            Message::user().with_text("add one"),
+            session_config.clone(),
+            Some(CancellationToken::new()),
+        )
+        .await?;
+    let new_working_dir = tempfile::tempdir()?;
+    let change_working_dir = async {
+        model_reply.entered().await;
+        agent
+            .config
+            .session_manager
+            .update(&session_config.id)
+            .working_dir(new_working_dir.path().to_path_buf())
+            .apply()
+            .await?;
+        model_reply.release();
+        anyhow::Ok(())
+    };
+    let (messages, changed) = tokio::join!(stream_messages(stream), change_working_dir);
+    messages?;
+    changed?;
+
+    assert_eq!(calculator.total(), 1);
+    let leased_working_dir = temp_dir.path().to_string_lossy().to_string();
+    assert!(calculator
+        .contexts()
+        .iter()
+        .all(|context| context.working_dir.as_deref() == Some(temp_dir.path())));
+    let hook_log = std::fs::read_to_string(plugin_dir.join("hook.log"))?;
+    let working_dirs = hook_log
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .map(|payload| payload["working_dir"].as_str().map(str::to_string))
+        })
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(working_dirs, vec![Some(leased_working_dir)]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn state_machine_skill_approval_uses_its_leased_working_dir() -> Result<()> {
     let (agent, api, session_id, old_working_dir) = agent_with_dummy_api().await?;

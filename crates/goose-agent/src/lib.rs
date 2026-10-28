@@ -3,6 +3,7 @@ pub mod hook;
 pub mod inference;
 pub mod machine;
 pub mod operation;
+pub mod post_tool_call_hook;
 pub mod post_tool_execution;
 pub mod pre_tool_execution;
 pub mod skills;

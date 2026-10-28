@@ -11,8 +11,6 @@ use crate::config::permission::PermissionLevel;
 use crate::config::GooseMode;
 #[cfg(feature = "code-mode")]
 use crate::conversation::message::MessageContent;
-#[cfg(feature = "code-mode")]
-use goose_agent::pre_tool_execution::EXECUTABLE_KEY;
 
 #[tokio::test]
 async fn prompt_and_skill_lifecycle() -> Result<()> {
@@ -169,24 +167,6 @@ async fn unadvertised_load_skill_is_neither_approved_nor_loaded() -> Result<()> 
             .iter()
             .any(|content| matches!(content, MessageContent::ActionRequired(_)))
     }));
-    let request = result
-        .conversation()
-        .messages()
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(MessageContent::as_tool_request)
-        .find(|request| {
-            request
-                .tool_call
-                .as_ref()
-                .is_ok_and(|tool_call| tool_call.name == "load_skill")
-        })
-        .expect("load_skill request");
-    assert!(request
-        .tool_meta
-        .as_ref()
-        .and_then(|metadata| metadata.get(EXECUTABLE_KEY))
-        .is_none());
 
     Ok(())
 }
