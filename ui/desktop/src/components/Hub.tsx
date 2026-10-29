@@ -154,7 +154,7 @@ export default function Hub({
         ? {
             extensionConfigs: selectNextChatExtensions(extensionsList, nextChatExtensionDraft),
           }
-        : { allExtensions: extensionsList };
+        : undefined;
 
       // Resolve the effective directory at submit time: the IPC lookup may still
       // be pending when the user submits, and an explicit pick must win.

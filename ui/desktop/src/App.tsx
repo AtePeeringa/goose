@@ -126,7 +126,6 @@ export const PairRouteWrapper = ({
           const newSession = await createSession(getInitialWorkingDir(), {
             recipeDeeplink: recipeDeeplinkFromConfig,
             recipeId: recipeIdFromConfig,
-            allExtensions: extensionsList,
           });
           const sessionInitialMessage = resolveSessionInitialMessage(newSession, initialMessage);
 

@@ -126,9 +126,7 @@ describe('Hub', () => {
         await act(async () => captured.chatInput?.onWorkingDirChange(selectedDir));
       }
       await submit();
-      expect(createSession).toHaveBeenCalledWith(selectedDir ?? '/projects/website', {
-        allExtensions: [],
-      });
+      expect(createSession).toHaveBeenCalledWith(selectedDir ?? '/projects/website', undefined);
     }
   );
 
@@ -188,7 +186,7 @@ describe('Hub', () => {
 
     await submit();
 
-    expect(createSession).toHaveBeenCalledWith('/tmp/goose', { allExtensions: [] });
+    expect(createSession).toHaveBeenCalledWith('/tmp/goose', undefined);
   });
 
   it('hands the draft to the input', () => {

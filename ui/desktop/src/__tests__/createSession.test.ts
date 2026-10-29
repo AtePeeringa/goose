@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSession } from '../sessions';
 import type { ExtensionConfig } from '../types/extensions';
 import type { Session } from '../types/session';
-import type { FixedExtensionEntry } from '../components/ConfigContext';
 import type { GooseExtension, GooseExtensionEntry } from '@aaif/goose-acp-client';
 import { getConfiguredGooseExtensions } from '../acp/extensions';
 import { acpChatSessionController } from '../acp/chatSessionController';
@@ -65,11 +64,6 @@ const extensionConfig = (name: string): ExtensionConfig => ({
   description: `${name} extension`,
 });
 
-const configuredExtension = (name: string, enabled: boolean): FixedExtensionEntry => ({
-  ...extensionConfig(name),
-  enabled,
-});
-
 const gooseExtension = (name: string): GooseExtension => ({
   type: 'builtin',
   name,
@@ -127,10 +121,7 @@ describe('createSession ACP session extensions', () => {
   });
 
   it('sends an explicitly empty selection as an empty list, not as "unspecified"', async () => {
-    await createSession('/tmp', {
-      extensionConfigs: [],
-      allExtensions: [configuredExtension('developer', true), configuredExtension('memory', false)],
-    });
+    await createSession('/tmp', { extensionConfigs: [] });
 
     expect(mockedGetConfiguredGooseExtensions).not.toHaveBeenCalled();
     expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', [], {
@@ -140,22 +131,10 @@ describe('createSession ACP session extensions', () => {
     });
   });
 
-  it('leaves the set unspecified when no configured extensions are enabled', async () => {
-    await createSession('/tmp', {
-      allExtensions: [configuredExtension('developer', false)],
-    });
+  it('leaves the set unspecified when no extension selection is provided', async () => {
+    await createSession('/tmp');
 
     expect(mockedGetConfiguredGooseExtensions).not.toHaveBeenCalled();
-    expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', undefined, {
-      recipeDeeplink: undefined,
-      recipeId: undefined,
-      recipeParameterScopeId: undefined,
-    });
-  });
-
-  it('leaves the set unspecified while the configured extensions are still loading', async () => {
-    await createSession('/tmp', { allExtensions: [] });
-
     expect(mockedCreateAcpSession).toHaveBeenCalledWith('/tmp', undefined, {
       recipeDeeplink: undefined,
       recipeId: undefined,
