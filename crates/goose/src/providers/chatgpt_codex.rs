@@ -17,7 +17,9 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use futures::{StreamExt, TryStreamExt};
 use goose_providers::errors::ProviderError;
-use goose_providers::formats::openai_responses::responses_api_to_streaming_message;
+use goose_providers::formats::openai_responses::{
+    reasoning_input_item, responses_api_to_streaming_message,
+};
 use goose_providers::model::ModelConfig;
 use rmcp::model::{ContentBlock, Role, Tool};
 use serde::{Deserialize, Serialize};
@@ -115,7 +117,7 @@ impl ChatGptCodexAuthState {
 static CHATGPT_CODEX_AUTH_STATE: LazyLock<Arc<ChatGptCodexAuthState>> =
     LazyLock::new(|| Arc::new(ChatGptCodexAuthState::new()));
 
-fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
+fn build_input_items(messages: &[Message], model_name: &str) -> Result<Vec<Value>> {
     let mut items = Vec::new();
 
     for message in messages {
@@ -152,6 +154,9 @@ fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
                         "type": "input_image",
                         "image_url": format!("data:{};base64,{}", img.mime_type, img.data),
                     }));
+                }
+                MessageContent::Thinking(thinking) if message.role == Role::Assistant => {
+                    items.extend(reasoning_input_item(message, thinking, model_name));
                 }
                 MessageContent::ToolRequest(request) => {
                     flush_text(&mut items, role, &mut content_items);
@@ -265,7 +270,7 @@ fn create_codex_request(
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<Value> {
-    let input_items = build_input_items(messages)?;
+    let input_items = build_input_items(messages, &model_config.model_name)?;
     let reasoning_effort = reasoning_effort_for_config(model_config);
 
     let mut payload = json!({
@@ -273,6 +278,7 @@ fn create_codex_request(
         "input": input_items,
         "store": false,
         "instructions": system,
+        "include": ["reasoning.encrypted_content"],
     });
 
     let payload_obj = payload
@@ -1147,7 +1153,7 @@ mod tests {
         "image content included in user message"
     )]
     fn test_codex_input_order(messages: Vec<Message>, expected: Vec<String>) {
-        let items = build_input_items(&messages).unwrap();
+        let items = build_input_items(&messages, "gpt-5.6").unwrap();
         let payload = json!({ "input": items });
         let kinds = input_kinds(&payload);
         assert_eq!(kinds, expected);
@@ -1156,7 +1162,7 @@ mod tests {
     #[test]
     fn test_image_url_format() {
         let messages = vec![Message::user().with_image(TEST_IMAGE_B64, "image/png")];
-        let items = build_input_items(&messages).unwrap();
+        let items = build_input_items(&messages, "gpt-5.6").unwrap();
         // The image is inside the content array of the user message
         let content = items[0]["content"].as_array().unwrap();
         let image_item = &content[0];
