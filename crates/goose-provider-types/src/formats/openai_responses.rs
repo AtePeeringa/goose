@@ -88,6 +88,19 @@ pub fn reasoning_input_item(
     }))
 }
 
+pub fn is_encrypted_reasoning_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("encrypted content") && lower.contains("could not be verified")
+}
+
+/// Rejected reasoning stays in the session, so callers retry once without any
+/// reasoning items rather than failing every later request.
+pub fn strip_reasoning_items(payload: &mut Value) {
+    if let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) {
+        input.retain(|item| item["type"] != "reasoning");
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]

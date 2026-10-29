@@ -18,7 +18,8 @@ use futures::future::BoxFuture;
 use futures::{StreamExt, TryStreamExt};
 use goose_providers::errors::ProviderError;
 use goose_providers::formats::openai_responses::{
-    reasoning_input_item, responses_api_to_streaming_message,
+    is_encrypted_reasoning_error, reasoning_input_item, responses_api_to_streaming_message,
+    strip_reasoning_items,
 };
 use goose_providers::model::ModelConfig;
 use rmcp::model::{ContentBlock, Role, Tool};
@@ -944,12 +945,23 @@ impl Provider for ChatGptCodexProvider {
             .map_err(|e| ProviderError::ExecutionError(e.to_string()))?;
         payload["stream"] = serde_json::Value::Bool(true);
 
-        let response = self
-            .with_retry(|| async {
-                let payload_clone = payload.clone();
-                self.post_streaming(&payload_clone).await
-            })
-            .await?;
+        let response = match self
+            .with_retry(|| async { self.post_streaming(&payload).await })
+            .await
+        {
+            Err(ProviderError::RequestFailed(message))
+                if is_encrypted_reasoning_error(&message) =>
+            {
+                tracing::warn!(
+                    error = %message,
+                    "API rejected replayed reasoning; retrying once without it"
+                );
+                strip_reasoning_items(&mut payload);
+                self.with_retry(|| async { self.post_streaming(&payload).await })
+                    .await
+            }
+            other => other,
+        }?;
 
         let stream = response.bytes_stream().map_err(io::Error::other);
 
